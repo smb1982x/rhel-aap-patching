@@ -1,0 +1,7 @@
+.gitignore
+.kilocode
+mcp.json
+.lock
+.ansible
+rhel-aap-patching_v1.tar.gz
+_PROBLEMS_.md
