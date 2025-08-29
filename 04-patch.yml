@@ -1,0 +1,218 @@
+---
+# JOB TEMPLATE NOTE:
+# - Expects verify_success_hosts from previous workflow step
+# - Extra vars: patch_strategy (optional: 'auto', 'conditional', 'package_only')
+
+- name: Validate hosts available for patching
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Check if verification produced any successful hosts
+      ansible.builtin.fail:
+        msg: "No hosts available for patching - verify_success_hosts is empty"
+      when: verify_success_hosts | default([]) | length == 0
+
+    - name: Create dynamic inventory group for patching
+      ansible.builtin.add_host:
+        hostname: "{{ item }}"
+        groups: "patch_targets"
+      loop: "{{ verify_success_hosts | default([]) }}"
+
+- name: Patch servers (all packages to latest) - Universal Package Manager Support
+  hosts: patch_targets
+  gather_facts: true  # Need facts for package manager detection
+  become: true
+  vars:
+    patch_async_timeout: "{{ patch_async_timeout | default(14400) }}"  # 4h
+    patch_poll_interval: "{{ patch_poll_interval | default(60) }}"
+    patch_strategy: "{{ patch_strategy | default('auto') }}"  # auto, conditional, package_only
+  tasks:
+    - name: Display detected package manager
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          OS Family: {{ ansible_os_family }}
+          Package Manager: {{ ansible_facts.pkg_mgr | default('unknown') }}
+          Strategy: {{ patch_strategy }}
+
+    # Strategy 1: Use ansible.builtin.package (universal, safest)
+    - name: Start package update using universal package module
+      ansible.builtin.package:
+        name: "*"
+        state: present
+        update_cache: true
+      async: "{{ patch_async_timeout }}"
+      poll: 0
+      register: package_async
+      failed_when: false
+      when: patch_strategy in ['auto', 'package_only']
+
+    - name: Wait for universal package update to finish
+      ansible.builtin.async_status:
+        jid: "{{ package_async.ansible_job_id }}"
+      register: package_wait
+      until: (package_wait.finished | default(0)) | int == 1
+      retries: "{{ (patch_async_timeout | int // patch_poll_interval | int) + 1 }}"
+      delay: "{{ patch_poll_interval | int }}"
+      failed_when: false
+      when: patch_strategy in ['auto', 'package_only'] and package_async.ansible_job_id is defined
+
+    # Strategy 2: Conditional logic for specific package managers (fallback)
+    - name: Fallback to specific package managers if universal approach fails
+      when: >
+        patch_strategy in ['auto', 'conditional'] and
+        (package_async is not defined or
+         package_async.failed | default(false) or
+         package_wait.failed | default(false))
+      block:
+        - name: Start package update using DNF (RHEL family)
+          ansible.builtin.dnf:
+            name: "*"
+            state: present
+            update_cache: true
+          async: "{{ patch_async_timeout }}"
+          poll: 0
+          register: dnf_async
+          failed_when: false
+          when:
+            - ansible_os_family == 'RedHat'
+            - ansible_facts.pkg_mgr in ['dnf', 'yum']
+
+        - name: Wait for DNF update to finish
+          ansible.builtin.async_status:
+            jid: "{{ dnf_async.ansible_job_id }}"
+          register: dnf_wait
+          until: (dnf_wait.finished | default(0)) | int == 1
+          retries: "{{ (patch_async_timeout | int // patch_poll_interval | int) + 1 }}"
+          delay: "{{ patch_poll_interval | int }}"
+          failed_when: false
+          when: dnf_async is defined and dnf_async.ansible_job_id is defined
+
+
+        # For systems where DNF isn't available but YUM is (legacy systems)
+        - name: Fallback to YUM for legacy systems
+          ansible.builtin.yum:
+            name: "*"
+            state: present
+            update_cache: true
+          async: "{{ patch_async_timeout }}"
+          poll: 0
+          register: yum_async
+          failed_when: false
+          when:
+            - ansible_os_family == 'RedHat'
+            - ansible_facts.pkg_mgr == 'yum'
+            - (dnf_async is not defined or dnf_async.failed | default(false))
+
+        - name: Wait for YUM update to finish
+          ansible.builtin.async_status:
+            jid: "{{ yum_async.ansible_job_id }}"
+          register: yum_wait
+          until: (yum_wait.finished | default(0)) | int == 1
+          retries: "{{ (patch_async_timeout | int // patch_poll_interval | int) + 1 }}"
+          delay: "{{ patch_poll_interval | int }}"
+          failed_when: false
+          when: yum_async is defined and yum_async.ansible_job_id is defined
+
+    # Cleanup async job files
+    - name: Cleanup async job files
+      ansible.builtin.async_status:
+        jid: "{{ item }}"
+        mode: cleanup
+      changed_when: false
+      failed_when: false
+      loop:
+        - "{{ package_async.ansible_job_id | default('') }}"
+        - "{{ dnf_async.ansible_job_id | default('') }}"
+        - "{{ yum_async.ansible_job_id | default('') }}"
+      when: item != ''
+
+    # Determine overall patch result
+    - name: Calculate patch result
+      ansible.builtin.set_fact:
+        patch_result_status: >-
+          {{
+            (
+              (package_wait.rc | default(1)) == 0 or
+              (dnf_wait.rc | default(1)) == 0 or
+              (yum_wait.rc | default(1)) == 0
+            ) and not (
+              package_wait.failed | default(false) or
+              dnf_wait.failed | default(false) or
+              yum_wait.failed | default(false)
+            )
+          }}
+
+    - name: Record successful patch results
+      ansible.builtin.set_stats:
+        data:
+          patch_success_hosts: "{{ patch_success_hosts | default([]) + [inventory_hostname] }}"
+          patch_method_map: >-
+            {{
+              patch_method_map | default({}) | combine({
+                inventory_hostname: 'universal' if (package_wait.rc | default(1)) == 0 else ('dnf' if (dnf_wait.rc | default(1)) == 0 else 'yum')
+              })
+            }}
+        aggregate: true
+        per_host: false
+      when: patch_result_status | default(false)
+
+    - name: Record failed patch results
+      ansible.builtin.set_stats:
+        data:
+          patch_failed_hosts: "{{ patch_failed_hosts | default([]) + [inventory_hostname] }}"
+          patch_failure_reasons: >-
+            {{
+              patch_failure_reasons | default({}) | combine({
+                inventory_hostname: package_wait.stderr | default(dnf_wait.stderr | default(yum_wait.stderr | default('Unknown patching error')))
+              })
+            }}
+        aggregate: true
+        per_host: false
+      when: not (patch_result_status | default(false))
+
+    - name: Display patch result for this host
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          Patch Status: {{ patch_result_status | default(false) | ternary('SUCCESS', 'FAILED') }}
+          Package Manager Used: {{ ansible_facts.pkg_mgr | default('unknown') }}
+          Strategy Used: {{ patch_strategy }}
+          Method: {{ 'universal' if (package_wait.rc | default(1)) == 0 else ('dnf' if (dnf_wait.rc | default(1)) == 0 else 'yum') }}
+
+- name: Patch phase summary
+  hosts: localhost
+  gather_facts: false
+  run_once: true
+  tasks:
+    - name: Calculate patch metrics safely
+      ansible.builtin.set_fact:
+        total_targets: "{{ verify_success_hosts | default([]) | length }}"
+        total_patched: "{{ patch_success_hosts | default([]) | length }}"
+        total_patch_failed: "{{ patch_failed_hosts | default([]) | length }}"
+
+    - name: Calculate patch success percentage
+      ansible.builtin.set_fact:
+        patch_percentage: >-
+          {{
+            (total_targets | int > 0) |
+            ternary(
+              ((total_patched | int * 100.0) / (total_targets | int)) | round(1),
+              0.0
+            )
+          }}
+
+    - name: Display patching summary
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          PATCH PHASE COMPLETED
+          ========================================
+          Target Hosts: {{ total_targets }}
+          Successful: {{ total_patched }}
+          Failed: {{ total_patch_failed }}
+          Success Rate: {{ patch_percentage }}%
+          ========================================
+          Successful Hosts: {{ patch_success_hosts | default([]) | join(', ') }}
+          Failed Hosts: {{ patch_failed_hosts | default([]) | join(', ') }}
+          ========================================

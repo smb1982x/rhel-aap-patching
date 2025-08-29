@@ -1,0 +1,158 @@
+---
+# JOB TEMPLATE NOTE:
+# - Expects reboot_success_hosts from previous workflow step
+# - Performs comprehensive post-patch health validation
+
+- name: Validate hosts available for health checking
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Check if reboot produced any successful hosts
+      ansible.builtin.fail:
+        msg: "No hosts available for health checking - reboot_success_hosts is empty"
+      when: reboot_success_hosts | default([]) | length == 0
+
+    - name: Create dynamic inventory group for health checking
+      ansible.builtin.add_host:
+        hostname: "{{ item }}"
+        groups: "health_targets"
+      loop: "{{ reboot_success_hosts | default([]) }}"
+
+- name: Post-patch health checks
+  hosts: health_targets
+  become: true
+  gather_facts: true
+  vars:
+    disk_util_warn: "{{ disk_util_warn | default(80) }}"  # percent
+  tasks:
+    - name: Collect service facts
+      ansible.builtin.service_facts:
+
+    - name: Check disk usage threshold
+      ansible.builtin.shell: |
+        set -o pipefail
+        df -P -x tmpfs -x devtmpfs | awk 'NR>1 {gsub("%%",$5); if ($5+0 > {{ disk_util_warn }}) {exit 1}}'
+      register: disk_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check SELinux status
+      ansible.builtin.command: getenforce
+      register: selinux_check
+      changed_when: false
+      failed_when: false
+
+    - name: Verify SSH service is running
+      ansible.builtin.set_fact:
+        ssh_running: "{{ (ansible_facts.services['sshd.service'] | default({'state': 'stopped'})).state == 'running' }}"
+
+    - name: Check system uptime and load
+      ansible.builtin.command: uptime
+      register: uptime_check
+      changed_when: false
+      failed_when: false
+
+    - name: Verify kernel version updated (if applicable)
+      ansible.builtin.command: uname -r
+      register: kernel_version
+      changed_when: false
+      failed_when: false
+
+    - name: Calculate overall health status
+      ansible.builtin.set_fact:
+        health_status: >-
+          {{
+            (disk_check.rc | default(1)) == 0 and
+            (selinux_check.rc | default(1)) == 0 and
+            (selinux_check.stdout | default('Unknown')) in ['Enforcing','Permissive'] and
+            ssh_running | default(false) and
+            (uptime_check.rc | default(1)) == 0
+          }}
+
+    - name: Record successful health check results
+      ansible.builtin.set_stats:
+        data:
+          health_success_hosts: "{{ health_success_hosts | default([]) + [inventory_hostname] }}"
+          health_details_map: >-
+            {{
+              health_details_map | default({}) | combine({
+                inventory_hostname: {
+                  'disk_usage_ok': (disk_check.rc | default(1)) == 0,
+                  'selinux_status': selinux_check.stdout | default('Unknown'),
+                  'ssh_running': ssh_running | default(false),
+                  'uptime': uptime_check.stdout | default('Unknown'),
+                  'kernel_version': kernel_version.stdout | default('Unknown')
+                }
+              })
+            }}
+        aggregate: true
+        per_host: false
+      when: health_status | default(false)
+
+    - name: Record failed health check results
+      ansible.builtin.set_stats:
+        data:
+          health_failed_hosts: "{{ health_failed_hosts | default([]) + [inventory_hostname] }}"
+          health_failure_details: >-
+            {{
+              health_failure_details | default({}) | combine({
+                inventory_hostname: {
+                  'disk_usage_ok': (disk_check.rc | default(1)) == 0,
+                  'disk_usage_error': disk_check.stderr | default('') if (disk_check.rc | default(1)) != 0 else '',
+                  'selinux_status': selinux_check.stdout | default('Unknown'),
+                  'ssh_running': ssh_running | default(false),
+                  'uptime_available': (uptime_check.rc | default(1)) == 0
+                }
+              })
+            }}
+        aggregate: true
+        per_host: false
+      when: not (health_status | default(false))
+
+    - name: Display health check results for this host
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          Overall Health: {{ health_status | default(false) | ternary('HEALTHY', 'UNHEALTHY') }}
+          Disk Usage: {{ 'OK' if (disk_check.rc | default(1)) == 0 else 'HIGH' }}
+          SELinux: {{ selinux_check.stdout | default('Unknown') }}
+          SSH Service: {{ 'Running' if ssh_running | default(false) else 'Not Running' }}
+          System Uptime: {{ uptime_check.stdout | default('Unknown') }}
+          Kernel Version: {{ kernel_version.stdout | default('Unknown') }}
+
+- name: Health check phase summary
+  hosts: localhost
+  gather_facts: false
+  run_once: true
+  tasks:
+    - name: Calculate health check metrics safely
+      ansible.builtin.set_fact:
+        total_targets: "{{ reboot_success_hosts | default([]) | length }}"
+        total_healthy: "{{ health_success_hosts | default([]) | length }}"
+        total_unhealthy: "{{ health_failed_hosts | default([]) | length }}"
+
+    - name: Calculate health success percentage
+      ansible.builtin.set_fact:
+        health_percentage: >-
+          {{
+            (total_targets | int > 0) |
+            ternary(
+              ((total_healthy | int * 100.0) / (total_targets | int)) | round(1),
+              0.0
+            )
+          }}
+
+    - name: Display health check summary
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          HEALTH CHECK PHASE COMPLETED
+          ========================================
+          Target Hosts: {{ total_targets }}
+          Healthy: {{ total_healthy }}
+          Unhealthy: {{ total_unhealthy }}
+          Success Rate: {{ health_percentage }}%
+          ========================================
+          Healthy Hosts: {{ health_success_hosts | default([]) | join(', ') }}
+          Unhealthy Hosts: {{ health_failed_hosts | default([]) | join(', ') }}
+          ========================================

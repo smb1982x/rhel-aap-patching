@@ -1,0 +1,340 @@
+---
+# JOB TEMPLATE NOTE:
+# - Inventory can be localhost-only (but any will work)
+# - Generates comprehensive HTML and CSV reports from workflow statistics
+
+- name: Build HTML summary report and CSV files
+  hosts: localhost
+  gather_facts: false
+  vars:
+    wf_report_root: "{{ (ansible_env.HOME | default('/runner')) ~ '/aap_reports' }}"
+    wf_run_date: "{{ lookup('pipe', 'date +%Y-%m-%d') }}"
+    wf_run_ts: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+    wf_report_dir: "{{ wf_report_root }}/reports_{{ wf_run_date | regex_replace('-', '') }}"
+    wf_report_file: "{{ wf_report_dir }}/aap_patch_report_{{ wf_run_ts }}.html"
+  tasks:
+    - name: Ensure report directory exists
+      ansible.builtin.file:
+        path: "{{ wf_report_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Export report paths to workflow
+      ansible.builtin.set_stats:
+        data:
+          ex_report_root: "{{ wf_report_root }}"
+          ex_report_dir: "{{ wf_report_dir }}"
+          ex_report_file: "{{ wf_report_file }}"
+          ex_run_date: "{{ wf_run_date }}"
+          ex_run_ts: "{{ wf_run_ts }}"
+        aggregate: true
+        per_host: false
+
+    - name: Calculate overall success and failure lists
+      ansible.builtin.set_fact:
+        overall_success: "{{ health_success_hosts | default([]) }}"
+        overall_failure: >-
+          {{
+            (discovery_failed_hosts | default([])) +
+            (contact_failed_hosts | default([])) +
+            (snapshot_failed_hosts | default([])) +
+            (verify_failed_hosts | default([])) +
+            (patch_failed_hosts | default([])) +
+            (reboot_failed_hosts | default([])) +
+            (health_failed_hosts | default([]))
+            | unique
+          }}
+        total_hosts: >-
+          {{
+            ((discovery_success_hosts | default([])) + (discovery_failed_hosts | default([]))) | length
+          }}
+
+    - name: Calculate phase totals safely
+      ansible.builtin.set_fact:
+        discovery_total: "{{ ((discovery_success_hosts | default([])) | length) + ((discovery_failed_hosts | default([])) | length) }}"
+        contact_total: "{{ ((contact_success_hosts | default([])) | length) + ((contact_failed_hosts | default([])) | length) }}"
+        snapshot_total: "{{ ((snapshot_success_hosts | default([])) | length) + ((snapshot_failed_hosts | default([])) | length) }}"
+        verify_total: "{{ ((verify_success_hosts | default([])) | length) + ((verify_failed_hosts | default([])) | length) }}"
+        patch_total: "{{ ((patch_success_hosts | default([])) | length) + ((patch_failed_hosts | default([])) | length) }}"
+        reboot_total: "{{ ((reboot_success_hosts | default([])) | length) + ((reboot_failed_hosts | default([])) | length) }}"
+        health_total: "{{ ((health_success_hosts | default([])) | length) + ((health_failed_hosts | default([])) | length) }}"
+
+    - name: Calculate phase success percentages safely
+      ansible.builtin.set_fact:
+        overall_success_rate: >-
+          {{ (total_hosts | int > 0) | ternary(((overall_success | length * 100.0) / (total_hosts | int)) | round(1), 0.0) }}
+        overall_failure_rate: >-
+          {{ (total_hosts | int > 0) | ternary(((overall_failure | length * 100.0) / (total_hosts | int)) | round(1), 0.0) }}
+        discovery_success_rate: >-
+          {{ (discovery_total | int > 0) | ternary(((discovery_success_hosts | default([]) | length * 100.0) / (discovery_total | int)) | round(1), 0.0) }}
+        contact_success_rate: >-
+          {{ (contact_total | int > 0) | ternary(((contact_success_hosts | default([]) | length * 100.0) / (contact_total | int)) | round(1), 0.0) }}
+        snapshot_success_rate: >-
+          {{ (snapshot_total | int > 0) | ternary(((snapshot_success_hosts | default([]) | length * 100.0) / (snapshot_total | int)) | round(1), 0.0) }}
+        verify_success_rate: >-
+          {{ (verify_total | int > 0) | ternary(((verify_success_hosts | default([]) | length * 100.0) / (verify_total | int)) | round(1), 0.0) }}
+        patch_success_rate: >-
+          {{ (patch_total | int > 0) | ternary(((patch_success_hosts | default([]) | length * 100.0) / (patch_total | int)) | round(1), 0.0) }}
+        reboot_success_rate: >-
+          {{ (reboot_total | int > 0) | ternary(((reboot_success_hosts | default([]) | length * 100.0) / (reboot_total | int)) | round(1), 0.0) }}
+        health_success_rate: >-
+          {{ (health_total | int > 0) | ternary(((health_success_hosts | default([]) | length * 100.0) / (health_total | int)) | round(1), 0.0) }}
+
+    - name: Generate CSV files for engineers
+      ansible.builtin.copy:
+        dest: "{{ wf_report_dir }}/{{ item.name }}.csv"
+        content: |
+          hostname
+          {% for host in item.hosts %}
+          {{ host }}
+          {% endfor %}
+        mode: "0644"
+      loop:
+        - { name: "discovery_success", hosts: "{{ discovery_success_hosts | default([]) }}" }
+        - { name: "discovery_failure", hosts: "{{ discovery_failed_hosts | default([]) }}" }
+        - { name: "contact_success", hosts: "{{ contact_success_hosts | default([]) }}" }
+        - { name: "contact_failure", hosts: "{{ contact_failed_hosts | default([]) }}" }
+        - { name: "snapshot_success", hosts: "{{ snapshot_success_hosts | default([]) }}" }
+        - { name: "snapshot_failure", hosts: "{{ snapshot_failed_hosts | default([]) }}" }
+        - { name: "verify_success", hosts: "{{ verify_success_hosts | default([]) }}" }
+        - { name: "verify_failure", hosts: "{{ verify_failed_hosts | default([]) }}" }
+        - { name: "patch_success", hosts: "{{ patch_success_hosts | default([]) }}" }
+        - { name: "patch_failure", hosts: "{{ patch_failed_hosts | default([]) }}" }
+        - { name: "reboot_success", hosts: "{{ reboot_success_hosts | default([]) }}" }
+        - { name: "reboot_failure", hosts: "{{ reboot_failed_hosts | default([]) }}" }
+        - { name: "health_success", hosts: "{{ health_success_hosts | default([]) }}" }
+        - { name: "health_failure", hosts: "{{ health_failed_hosts | default([]) }}" }
+        - { name: "overall_success", hosts: "{{ overall_success }}" }
+        - { name: "overall_failure", hosts: "{{ overall_failure }}" }
+
+    - name: Compose enhanced report content
+      ansible.builtin.set_fact:
+        report_html: |
+          <!doctype html>
+          <html lang="en"><head>
+            <meta charset="utf-8" />
+            <title>AAP Patch Workflow Report - {{ wf_run_ts }}</title>
+            <style>
+              body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;background:#f8f9fa}
+              .container{max-width:1200px;margin:0 auto;background:white;padding:24px;border-radius:12px;box-shadow:0 4px 6px rgba(0,0,0,.1)}
+              h1{margin-bottom:8px;color:#2c3e50} h2{color:#34495e;border-bottom:2px solid #3498db;padding-bottom:8px}
+              small{color:#666} .timestamp{color:#888;font-size:0.9em}
+              .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:20px 0}
+              .card{border:1px solid #ddd;border-radius:8px;padding:16px;background:white;box-shadow:0 2px 4px rgba(0,0,0,.05)}
+              .success{color:#27ae60;font-weight:600} .failure{color:#e74c3c;font-weight:600}
+              .summary{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;border:none;margin:20px 0}
+              .summary h2{color:white;border-bottom:2px solid rgba(255,255,255,0.3)}
+              code{background:#ecf0f1;padding:3px 6px;border-radius:4px;font-size:0.9em;color:#2c3e50}
+              .percentage{font-size:0.85em;color:#7f8c8d;margin-left:8px;font-weight:normal}
+              .phase-header{font-size:1.1em;font-weight:600;margin-bottom:12px;color:#2c3e50}
+              .metric-row{display:flex;justify-content:space-between;align-items:center;margin:8px 0}
+              .status-badge{padding:4px 8px;border-radius:4px;font-size:0.8em;font-weight:600}
+              .badge-success{background:#d4edda;color:#155724} .badge-failure{background:#f8d7da;color:#721c24}
+              .host-list{font-size:0.9em;color:#495057;margin-top:8px;max-height:100px;overflow-y:auto}
+            </style>
+          </head><body>
+            <div class="container">
+            <h1>AAP Patch Workflow Report</h1>
+            <div class="timestamp">Generated: {{ lookup('pipe', 'date -Iseconds') }} | Run ID: {{ wf_run_ts }}</div>
+
+            <div class="card summary">
+              <h2>Executive Summary</h2>
+              <div class="metric-row">
+                <span>Total Hosts Processed:</span>
+                <span><strong>{{ total_hosts }}</strong></span>
+              </div>
+              <div class="metric-row">
+                <span>Successfully Completed Entire Workflow:</span>
+                <span class="success">{{ overall_success | length }} <span class="percentage">
+                  ({{ overall_success_rate }}%)
+                </span></span>
+              </div>
+              <div class="metric-row">
+                <span>Failed at Some Stage:</span>
+                <span class="failure">{{ overall_failure | length }} <span class="percentage">
+                  ({{ overall_failure_rate }}%)
+                </span></span>
+              </div>
+              {% if snapshot_name_expected is defined %}
+              <div class="metric-row">
+                <span>Snapshot Name Created:</span>
+                <span><code>{{ snapshot_name_expected }}</code></span>
+              </div>
+              {% endif %}
+            </div>
+
+            <h2>Workflow Phase Results</h2>
+            <div class="grid">
+              <div class="card">
+                <div class="phase-header">Discovery Phase</div>
+                <div class="metric-row">
+                  <span>Success:</span>
+                  <span class="status-badge badge-success">{{ discovery_success_hosts | default([]) | length }}</span>
+                </div>
+                <div class="metric-row">
+                  <span>Failure:</span>
+                  <span class="status-badge badge-failure">{{ discovery_failed_hosts | default([]) | length }}</span>
+                </div>
+                {% if discovery_total | int > 0 %}
+                <div class="percentage">{{ discovery_success_rate }}% success rate</div>
+                {% endif %}
+                {% if discovery_failed_hosts | default([]) | length > 0 %}
+                <div class="host-list"><strong>Failed:</strong> {{ discovery_failed_hosts | default([]) | join(', ') }}</div>
+                {% endif %}
+              </div>
+
+              <div class="card">
+                <div class="phase-header">Contact Phase</div>
+                <div class="metric-row">
+                  <span>Success:</span>
+                  <span class="status-badge badge-success">{{ contact_success_hosts | default([]) | length }}</span>
+                </div>
+                <div class="metric-row">
+                  <span>Failure:</span>
+                  <span class="status-badge badge-failure">{{ contact_failed_hosts | default([]) | length }}</span>
+                </div>
+                {% if contact_total | int > 0 %}
+                <div class="percentage">{{ contact_success_rate }}% success rate</div>
+                {% endif %}
+                {% if contact_failed_hosts | default([]) | length > 0 %}
+                <div class="host-list"><strong>Failed:</strong> {{ contact_failed_hosts | default([]) | join(', ') }}</div>
+                {% endif %}
+              </div>
+
+              <div class="card">
+                <div class="phase-header">Snapshot Phase</div>
+                <div class="metric-row">
+                  <span>Success:</span>
+                  <span class="status-badge badge-success">{{ snapshot_success_hosts | default([]) | length }}</span>
+                </div>
+                <div class="metric-row">
+                  <span>Failure:</span>
+                  <span class="status-badge badge-failure">{{ snapshot_failed_hosts | default([]) | length }}</span>
+                </div>
+                {% if snapshot_total | int > 0 %}
+                <div class="percentage">{{ snapshot_success_rate }}% success rate</div>
+                {% endif %}
+                {% if snapshot_failed_hosts | default([]) | length > 0 %}
+                <div class="host-list"><strong>Failed:</strong> {{ snapshot_failed_hosts | default([]) | join(', ') }}</div>
+                {% endif %}
+              </div>
+
+              <div class="card">
+                <div class="phase-header">Verify Phase</div>
+                <div class="metric-row">
+                  <span>Success:</span>
+                  <span class="status-badge badge-success">{{ verify_success_hosts | default([]) | length }}</span>
+                </div>
+                <div class="metric-row">
+                  <span>Failure:</span>
+                  <span class="status-badge badge-failure">{{ verify_failed_hosts | default([]) | length }}</span>
+                </div>
+                {% if verify_total | int > 0 %}
+                <div class="percentage">{{ verify_success_rate }}% success rate</div>
+                {% endif %}
+                {% if verify_failed_hosts | default([]) | length > 0 %}
+                <div class="host-list"><strong>Failed:</strong> {{ verify_failed_hosts | default([]) | join(', ') }}</div>
+                {% endif %}
+              </div>
+
+              <div class="card">
+                <div class="phase-header">Patch Phase</div>
+                <div class="metric-row">
+                  <span>Success:</span>
+                  <span class="status-badge badge-success">{{ patch_success_hosts | default([]) | length }}</span>
+                </div>
+                <div class="metric-row">
+                  <span>Failure:</span>
+                  <span class="status-badge badge-failure">{{ patch_failed_hosts | default([]) | length }}</span>
+                </div>
+                {% if patch_total | int > 0 %}
+                <div class="percentage">{{ patch_success_rate }}% success rate</div>
+                {% endif %}
+                {% if patch_failed_hosts | default([]) | length > 0 %}
+                <div class="host-list"><strong>Failed:</strong> {{ patch_failed_hosts | default([]) | join(', ') }}</div>
+                {% endif %}
+              </div>
+
+              <div class="card">
+                <div class="phase-header">Reboot Phase</div>
+                <div class="metric-row">
+                  <span>Success:</span>
+                  <span class="status-badge badge-success">{{ reboot_success_hosts | default([]) | length }}</span>
+                </div>
+                <div class="metric-row">
+                  <span>Failure:</span>
+                  <span class="status-badge badge-failure">{{ reboot_failed_hosts | default([]) | length }}</span>
+                </div>
+                {% if reboot_total | int > 0 %}
+                <div class="percentage">{{ reboot_success_rate }}% success rate</div>
+                {% endif %}
+                {% if reboot_failed_hosts | default([]) | length > 0 %}
+                <div class="host-list"><strong>Failed:</strong> {{ reboot_failed_hosts | default([]) | join(', ') }}</div>
+                {% endif %}
+              </div>
+
+              <div class="card">
+                <div class="phase-header">Health Check Phase</div>
+                <div class="metric-row">
+                  <span>Success:</span>
+                  <span class="status-badge badge-success">{{ health_success_hosts | default([]) | length }}</span>
+                </div>
+                <div class="metric-row">
+                  <span>Failure:</span>
+                  <span class="status-badge badge-failure">{{ health_failed_hosts | default([]) | length }}</span>
+                </div>
+                {% if health_total | int > 0 %}
+                <div class="percentage">{{ health_success_rate }}% success rate</div>
+                {% endif %}
+                {% if health_failed_hosts | default([]) | length > 0 %}
+                <div class="host-list"><strong>Failed:</strong> {{ health_failed_hosts | default([]) | join(', ') }}</div>
+                {% endif %}
+              </div>
+            </div>
+
+            <div class="card">
+              <h2>Engineering Resources</h2>
+              <p>The following CSV files have been generated in <code>{{ wf_report_dir }}</code> for detailed analysis:</p>
+              <ul>
+                <li><strong>Phase-specific reports:</strong> Success/failure lists for each workflow step</li>
+                <li><strong>overall_success.csv:</strong> Hosts that completed the entire workflow successfully</li>
+                <li><strong>overall_failure.csv:</strong> Hosts that failed at any stage</li>
+                <li><strong>Complete audit trail:</strong> All intermediate results for troubleshooting</li>
+              </ul>
+            </div>
+
+            <div class="card">
+              <h2>Workflow Metrics</h2>
+              <div class="metric-row">
+                <span>Workflow Completion Rate:</span>
+                <span><strong>{{ overall_success_rate }}%</strong></span>
+              </div>
+              <div class="metric-row">
+                <span>Report Generation Time:</span>
+                <span>{{ lookup('pipe', 'date -Iseconds') }}</span>
+              </div>
+              <div class="metric-row">
+                <span>Total Execution Duration:</span>
+                <span>{{ wf_run_ts }} series</span>
+              </div>
+            </div>
+            </div>
+          </body></html>
+
+    - name: Write enhanced report file
+      ansible.builtin.copy:
+        dest: "{{ wf_report_file }}"
+        content: "{{ report_html }}"
+        mode: "0644"
+
+    - name: Show where the report was saved
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          REPORT GENERATION COMPLETED
+          ========================================
+          Report Location: {{ wf_report_file }}
+          CSV Directory: {{ wf_report_dir }}/
+          Successfully Completed: {{ overall_success | length }}/{{ total_hosts }}
+          Overall Success Rate: {{ overall_success_rate }}%
+          ========================================

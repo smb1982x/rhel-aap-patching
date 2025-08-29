@@ -1,0 +1,102 @@
+---
+# JOB TEMPLATE NOTE:
+# - Inventory: RHEL Linux fleet
+# - Extra vars expected: vcenter_server, vcenter_user, vcenter_pass, datacenter_name
+#   Optional: vmware_validate_certs=true|false (default true), vm_name per-host override
+
+- name: Discover VM folder/name and seed workflow
+  hosts: all
+  gather_facts: false
+  vars:
+    vmware_validate_certs: "{{ vmware_validate_certs | default(true) }}"
+    discovery_connect_timeout: 15
+    discovery_connect_sleep: 1
+  tasks:
+    - name: Resolve VM info (folder/name) from vCenter
+      community.vmware.vmware_guest_info:
+        hostname: "{{ vcenter_server }}"
+        username: "{{ vcenter_user }}"
+        password: "{{ vcenter_pass }}"
+        validate_certs: "{{ vmware_validate_certs }}"
+        datacenter: "{{ datacenter_name }}"
+        name: "{{ hostvars[inventory_hostname].vm_name | default(inventory_hostname) }}"
+      register: vm_info
+      delegate_to: localhost
+      failed_when: false
+
+    - name: Store successful VM discovery results
+      ansible.builtin.set_stats:
+        data:
+          discovery_success_hosts: "{{ discovery_success_hosts | default([]) + [inventory_hostname] }}"
+          vm_folder_map: >-
+            {{
+              vm_folder_map | default({}) | combine({
+                inventory_hostname: vm_info.instance.hw_folder
+              })
+            }}
+          vm_name_map: >-
+            {{
+              vm_name_map | default({}) | combine({
+                inventory_hostname: vm_info.instance.hw_name | default(hostvars[inventory_hostname].vm_name | default(inventory_hostname))
+              })
+            }}
+        aggregate: true
+        per_host: false
+      when:
+        - not (vm_info.failed | default(false))
+        - vm_info.instance is defined
+        - vm_info.instance.hw_folder is defined
+
+    - name: Store failed VM discovery results
+      ansible.builtin.set_stats:
+        data:
+          discovery_failed_hosts: "{{ discovery_failed_hosts | default([]) + [inventory_hostname] }}"
+          discovery_failure_reasons: >-
+            {{
+              discovery_failure_reasons | default({}) | combine({
+                inventory_hostname: vm_info.msg | default('VM not found or accessible in vCenter')
+              })
+            }}
+        aggregate: true
+        per_host: false
+      when:
+        - vm_info.failed | default(false) or vm_info.instance is not defined
+
+    - name: Store per-host VM facts for later workflow steps
+      when:
+        - not (vm_info.failed | default(false))
+        - vm_info.instance is defined
+      ansible.builtin.set_fact:
+        vm_folder: "{{ vm_info.instance.hw_folder }}"
+        vm_name_resolved: "{{ vm_info.instance.hw_name | default(hostvars[inventory_hostname].vm_name | default(inventory_hostname)) }}"
+
+    - name: Display discovery results for this host
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          VM Discovery: {{ 'SUCCESS' if (not (vm_info.failed | default(false)) and vm_info.instance is defined) else 'FAILED' }}
+          VM Name: {{ vm_info.instance.hw_name | default('Unknown') if vm_info.instance is defined else 'Not found' }}
+          VM Folder: {{ vm_info.instance.hw_folder | default('Unknown') if vm_info.instance is defined else 'Not found' }}
+          {% if vm_info.failed | default(false) %}
+          Error: {{ vm_info.msg | default('Unknown error') }}
+          {% endif %}
+
+- name: Discovery phase summary
+  hosts: localhost
+  gather_facts: false
+  run_once: true
+  tasks:
+    - name: Validate discovery results and display summary
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          DISCOVERY PHASE COMPLETED
+          ========================================
+          Total Hosts: {{ groups['all'] | length }}
+          Successful: {{ discovery_success_hosts | default([]) | length }}
+          Failed: {{ discovery_failed_hosts | default([]) | length }}
+          Success Rate: {{ ((discovery_success_hosts | default([]) | length) * 100.0 / (groups['all'] | length | default(1))) | round(1) }}%
+          ========================================
+          Successful Hosts: {{ discovery_success_hosts | default([]) | join(', ') }}
+          Failed Hosts: {{ discovery_failed_hosts | default([]) | join(', ') }}
+          ========================================\n

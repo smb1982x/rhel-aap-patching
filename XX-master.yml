@@ -1,0 +1,57 @@
+---
+# Master VM Patching Workflow Orchestration
+# This playbook coordinates the entire VM patching workflow with proper error handling
+# and conditional execution based on previous step results.
+
+- name: Phase 1 - Discovery and VM validation
+  import_playbook: 00-discovery.yml
+
+- name: Phase 2 - Contact testing (conditional on discovery success)
+  import_playbook: 01-contact.yml
+  when: discovery_success_hosts | default([]) | length > 0
+
+- name: Phase 3 - Snapshot creation (conditional on contact success)
+  import_playbook: 02-snapshot_init.yml
+  when: contact_success_hosts | default([]) | length > 0
+
+- name: Phase 4 - Snapshot verification (conditional on snapshot success)
+  import_playbook: 03-snapshot_verify.yml
+  when: snapshot_success_hosts | default([]) | length > 0
+
+- name: Phase 5 - Package patching (conditional on verification success)
+  import_playbook: 04-patch.yml
+  when: verify_success_hosts | default([]) | length > 0
+
+- name: Phase 6 - System reboot (conditional on patch success)
+  import_playbook: 05-reboot.yml
+  when: patch_success_hosts | default([]) | length > 0
+
+- name: Phase 7 - Health validation (conditional on reboot success)
+  import_playbook: 06-healthcheck.yml
+  when: reboot_success_hosts | default([]) | length > 0
+
+- name: Phase 8 - Report generation (always run for audit trail)
+  import_playbook: 07-report.yml
+
+- name: Phase 9 - Report publishing (always run if reports exist)
+  import_playbook: 08-publish.yml
+  when: 
+    - ex_report_file is defined
+    - ex_report_file != ""
+
+- name: Workflow completion summary
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Display final workflow status
+      debug:
+        msg: |
+          ========================================
+          VM PATCHING WORKFLOW COMPLETED
+          ========================================
+          Total Hosts Processed: {{ (discovery_success_hosts | default([])) | length }}
+          Successfully Completed: {{ (health_success_hosts | default([])) | length }}
+          Failed at Some Stage: {{ (discovery_failed_hosts | default([])) + (contact_failed_hosts | default([])) + (snapshot_failed_hosts | default([])) + (verify_failed_hosts | default([])) + (patch_failed_hosts | default([])) + (reboot_failed_hosts | default([])) + (health_failed_hosts | default([])) | unique | length }}
+          Report Location: {{ ex_report_file | default('Not generated') }}
+          Published URL: {{ gitlab_report_url | default('Not published') }}
+          ========================================
