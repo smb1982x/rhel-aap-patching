@@ -19,7 +19,7 @@
     # Source paths from previous report step (published by 07-report.yml via set_stats)
     source_report_dir: "{{ ex_report_dir | default('') }}"
     source_report_file: "{{ ex_report_file | default('') }}"
-
+    
     # Local repository path for GitLab operations
     repo_local_path: "/tmp/gitlab_repo_{{ ex_run_ts | default(ansible_date_time.epoch) }}"
 
@@ -33,7 +33,7 @@
 
   tasks:
     - name: Validate required variables
-      ansible.builtin.assert:
+      assert:
         that:
           - gitlab_repo_url is defined and gitlab_repo_url != ""
           - gitlab_token is defined and gitlab_token != ""
@@ -46,7 +46,7 @@
             - source_report_dir must exist from previous report step
 
     - name: Debug incoming report variables
-      ansible.builtin.debug:
+      debug:
         msg:
           - "ex_report_dir={{ ex_report_dir | default('<undefined>') }}"
           - "ex_report_root={{ ex_report_root | default('<undefined>') }}"
@@ -57,44 +57,44 @@
           - "repo_local_path={{ repo_local_path }}"
 
     - name: Check if source report directory exists
-      ansible.builtin.stat:
+      stat:
         path: "{{ source_report_dir }}"
       register: source_dir_stat
 
     - name: Fail if source reports not found
-      ansible.builtin.fail:
+      fail:
         msg: >-
           Source report directory '{{ source_report_dir }}' not found.
           Ensure the report generation step ran successfully before publish.
       when: not source_dir_stat.stat.exists
 
     - name: Find CSV report files
-      ansible.builtin.find:
+      find:
         paths: "{{ source_report_dir }}"
         patterns: "*.csv"
         recurse: true
       register: csv_files
 
     - name: Find HTML report files
-      ansible.builtin.find:
+      find:
         paths: "{{ source_report_dir }}"
         patterns: "*.html"
         recurse: true
       register: html_files
 
     - name: Ensure local repo parent directory exists
-      ansible.builtin.file:
+      file:
         path: "{{ repo_local_path | dirname }}"
         state: directory
         mode: "0755"
 
     - name: Check if repo already exists (has .git)
-      ansible.builtin.stat:
+      stat:
         path: "{{ repo_local_path }}/.git"
       register: repo_stat
 
     - name: Clone repo using access token (first time)
-      ansible.builtin.git:
+      git:
         repo: "{{ gitlab_auth_url }}"
         dest: "{{ repo_local_path }}"
         version: "{{ gitlab_branch }}"
@@ -104,7 +104,7 @@
       no_log: true  # Hide token from logs
 
     - name: Pull latest changes using access token
-      ansible.builtin.git:
+      git:
         repo: "{{ gitlab_auth_url }}"
         dest: "{{ repo_local_path }}"
         version: "{{ gitlab_branch }}"
@@ -114,45 +114,31 @@
       no_log: true  # Hide token from logs
 
     - name: Ensure publication folder for this run exists
-      ansible.builtin.file:
-        path: >-
-          {{ repo_local_path }}/{{ publish_base_path }}/
-          {{ ex_run_date | default(ansible_date_time.date) }}/
-          {{ ex_run_ts | default(ansible_date_time.epoch) }}
+      file:
+        path: "{{ repo_local_path }}/{{ publish_base_path }}/{{ ex_run_date | default(ansible_date_time.date) }}/{{ ex_run_ts | default(ansible_date_time.epoch) }}"
         state: directory
         mode: "0755"
         recurse: true
 
     - name: Copy CSV files to GitLab repo
-      ansible.builtin.copy:
+      copy:
         src: "{{ item.path }}"
-        dest: >-
-          {{ repo_local_path }}/{{ publish_base_path }}/
-          {{ ex_run_date | default(ansible_date_time.date) }}/
-          {{ ex_run_ts | default(ansible_date_time.epoch) }}/
-          {{ item.path | basename }}
+        dest: "{{ repo_local_path }}/{{ publish_base_path }}/{{ ex_run_date | default(ansible_date_time.date) }}/{{ ex_run_ts | default(ansible_date_time.epoch) }}/{{ item.path | basename }}"
         mode: "0644"
       loop: "{{ csv_files.files }}"
       when: csv_files.files | length > 0
 
     - name: Copy HTML report files to GitLab repo
-      ansible.builtin.copy:
+      copy:
         src: "{{ item.path }}"
-        dest: >-
-          {{ repo_local_path }}/{{ publish_base_path }}/
-          {{ ex_run_date | default(ansible_date_time.date) }}/
-          {{ ex_run_ts | default(ansible_date_time.epoch) }}/
-          {{ item.path | basename }}
+        dest: "{{ repo_local_path }}/{{ publish_base_path }}/{{ ex_run_date | default(ansible_date_time.date) }}/{{ ex_run_ts | default(ansible_date_time.epoch) }}/{{ item.path | basename }}"
         mode: "0644"
       loop: "{{ html_files.files }}"
       when: html_files.files | length > 0
 
     - name: Create per-run README index (Markdown)
-      ansible.builtin.copy:
-        dest: >-
-          {{ repo_local_path }}/{{ publish_base_path }}/
-          {{ ex_run_date | default(ansible_date_time.date) }}/
-          {{ ex_run_ts | default(ansible_date_time.epoch) }}/README.md
+      copy:
+        dest: "{{ repo_local_path }}/{{ publish_base_path }}/{{ ex_run_date | default(ansible_date_time.date) }}/{{ ex_run_ts | default(ansible_date_time.epoch) }}/README.md"
         mode: "0644"
         content: |
           # AAP Patch Workflow Report - {{ ex_run_ts | default(ansible_date_time.epoch) }}
@@ -176,18 +162,8 @@
 
           {% if health_success_hosts is defined and health_failed_hosts is defined %}
           - **Total Hosts:** {{ (health_success_hosts | length) + (health_failed_hosts | length) }}
-          - **Successful:** {{ health_success_hosts | length }}
-            ({{
-              (health_success_hosts | length) * 100.0
-              / ((health_success_hosts | length) + (health_failed_hosts | length) | default(1))
-              | round(1)
-            }}%)
-          - **Failed:** {{ health_failed_hosts | length }}
-            ({{
-              (health_failed_hosts | length) * 100.0
-              / ((health_success_hosts | length) + (health_failed_hosts | length) | default(1))
-              | round(1)
-            }}%)
+          - **Successful:** {{ health_success_hosts | length }} ({{ ((health_success_hosts | length) * 100.0 / ((health_success_hosts | length) + (health_failed_hosts | length))) | round(1) }}%)
+          - **Failed:** {{ health_failed_hosts | length }} ({{ ((health_failed_hosts | length) * 100.0 / ((health_success_hosts | length) + (health_failed_hosts | length))) | round(1) }}%)
           {% endif %}
 
           {% if snapshot_name_expected is defined %}
@@ -204,13 +180,13 @@
 
     # Configure Git identity for this repo (idempotent; does not expose secrets)
     - name: Set Git user.name for this repo
-      ansible.builtin.shell: |
+      shell: |
         cd "{{ repo_local_path }}"
         git config user.name "{{ gitlab_user_name }}"
       changed_when: false
 
     - name: Set Git user.email for this repo
-      ansible.builtin.shell: |
+      shell: |
         cd "{{ repo_local_path }}"
         git config user.email "{{ gitlab_user_email }}"
       changed_when: false
@@ -218,13 +194,13 @@
     - name: Publish to GitLab (stage, commit, push, report)
       block:
         - name: Stage all changes for commit
-          ansible.builtin.shell: |
+          shell: |
             cd "{{ repo_local_path }}"
             git add --all "{{ publish_base_path }}/{{ ex_run_date | default(ansible_date_time.date) }}/{{ ex_run_ts | default(ansible_date_time.epoch) }}/"
           changed_when: false
 
         - name: Detect if any staged changes exist
-          ansible.builtin.shell: |
+          shell: |
             cd "{{ repo_local_path }}"
             git diff --staged --quiet || echo "CHANGED"
           register: staged
@@ -232,7 +208,7 @@
           failed_when: false
 
         - name: Commit staged changes (only when needed)
-          ansible.builtin.shell: |
+          shell: |
             cd "{{ repo_local_path }}"
             git commit -m "Automated publication for {{ ex_run_date | default(ansible_date_time.date) }} {{ ex_run_ts | default(ansible_date_time.epoch) }}
 
@@ -249,7 +225,7 @@
             (git_commit.stdout is search('file\\(s\\)? changed|insertion\\(s\\)?|deletion\\(s\\)?'))
 
         - name: Push commit to GitLab using access token
-          ansible.builtin.shell: |
+          shell: |
             cd "{{ repo_local_path }}"
             git push "{{ gitlab_auth_url }}" "{{ gitlab_branch }}"
           when: staged.stdout == "CHANGED"
@@ -261,7 +237,7 @@
           failed_when: git_push.rc != 0
 
         - name: Calculate GitLab URLs for this run
-          ansible.builtin.set_fact:
+          set_fact:
             gitlab_base_url: "{{ gitlab_repo_url | regex_replace('\\.git$', '') }}"
             report_web_path: "{{ publish_base_path }}/{{ ex_run_date | default(ansible_date_time.date) }}/{{ ex_run_ts | default(ansible_date_time.epoch) }}"
             report_html_name: >-
@@ -270,7 +246,7 @@
               }}
 
         - name: Publish GitLab URLs and counts to workflow (set_stats)
-          ansible.builtin.set_stats:
+          set_stats:
             data:
               gitlab_report_url: "{{ gitlab_base_url }}/-/tree/{{ gitlab_branch }}/{{ report_web_path }}"
               gitlab_html_url: "{{ gitlab_base_url }}/-/blob/{{ gitlab_branch }}/{{ report_web_path }}/{{ report_html_name }}"
@@ -281,7 +257,7 @@
             per_host: false
 
         - name: Display publication results
-          ansible.builtin.debug:
+          debug:
             msg: |
               ========================================
               PUBLICATION SUCCESSFUL
@@ -297,7 +273,7 @@
 
       rescue:
         - name: Mark publication failure (set_stats)
-          ansible.builtin.set_stats:
+          set_stats:
             data:
               publish_status: "failed"
               publish_error: "{{ ansible_failed_result.msg | default('Unknown error during GitLab publication') }}"
@@ -305,7 +281,7 @@
             per_host: false
 
         - name: Display failure information
-          ansible.builtin.debug:
+          debug:
             msg: |
               ========================================
               PUBLICATION FAILED
@@ -314,23 +290,19 @@
               Repo: {{ gitlab_repo_url }}
               Branch: {{ gitlab_branch }}
               Time: {{ lookup('pipe', 'date -Iseconds') }}
-
-
               ========================================
 
         - name: Re-raise failure to stop workflow
-          ansible.builtin.fail:
+          fail:
             msg: "GitLab publication failed: {{ ansible_failed_result.msg | default('Unknown error') }}"
 
       always:
         - name: Cleanup temporary repository
-          ansible.builtin.file:
+          file:
             path: "{{ repo_local_path }}"
             state: absent
-          failed_when: >
-            ansible_failed_result.rc != 0 and
-            'No such file or directory' not in ansible_failed_result.msg
+          ignore_errors: true
 
         - name: Final publication status
-          ansible.builtin.debug:
+          debug:
             msg: "Publish status: {{ publish_status | default('unknown') }}"

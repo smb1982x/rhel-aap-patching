@@ -25,7 +25,7 @@
       failed_when: false
 
     - name: Store successful VM discovery results
-      ansible.builtin.set_stats:
+      set_stats:
         data:
           discovery_success_hosts: "{{ discovery_success_hosts | default([]) + [inventory_hostname] }}"
           vm_folder_map: >-
@@ -42,13 +42,13 @@
             }}
         aggregate: true
         per_host: false
-      when:
+      when: 
         - not (vm_info.failed | default(false))
         - vm_info.instance is defined
         - vm_info.instance.hw_folder is defined
 
     - name: Store failed VM discovery results
-      ansible.builtin.set_stats:
+      set_stats:
         data:
           discovery_failed_hosts: "{{ discovery_failed_hosts | default([]) + [inventory_hostname] }}"
           discovery_failure_reasons: >-
@@ -59,11 +59,11 @@
             }}
         aggregate: true
         per_host: false
-      when:
+      when: 
         - vm_info.failed | default(false) or vm_info.instance is not defined
 
     - name: Store per-host VM facts for later workflow steps
-      when:
+      when: 
         - not (vm_info.failed | default(false))
         - vm_info.instance is defined
       ansible.builtin.set_fact:
@@ -71,7 +71,7 @@
         vm_name_resolved: "{{ vm_info.instance.hw_name | default(hostvars[inventory_hostname].vm_name | default(inventory_hostname)) }}"
 
     - name: Display discovery results for this host
-      ansible.builtin.debug:
+      debug:
         msg: |
           Host: {{ inventory_hostname }}
           VM Discovery: {{ 'SUCCESS' if (not (vm_info.failed | default(false)) and vm_info.instance is defined) else 'FAILED' }}
@@ -87,7 +87,7 @@
   run_once: true
   tasks:
     - name: Validate discovery results and display summary
-      ansible.builtin.debug:
+      debug:
         msg: |
           ========================================
           DISCOVERY PHASE COMPLETED
@@ -95,8 +95,8 @@
           Total Hosts: {{ groups['all'] | length }}
           Successful: {{ discovery_success_hosts | default([]) | length }}
           Failed: {{ discovery_failed_hosts | default([]) | length }}
-          Success Rate: {{ ((discovery_success_hosts | default([]) | length) * 100.0 / (groups['all'] | length | default(1))) | round(1) }}%
+          Success Rate: {{ ((discovery_success_hosts | default([]) | length) * 100.0 / groups['all'] | length) | round(1) }}%
           ========================================
           Successful Hosts: {{ discovery_success_hosts | default([]) | join(', ') }}
           Failed Hosts: {{ discovery_failed_hosts | default([]) | join(', ') }}
-          ========================================\n
+          ========================================

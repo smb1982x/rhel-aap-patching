@@ -8,17 +8,17 @@
   gather_facts: false
   tasks:
     - name: Check if snapshot creation produced any successful hosts
-      ansible.builtin.fail:
+      fail:
         msg: "No hosts available for snapshot verification - snapshot_success_hosts is empty"
       when: snapshot_success_hosts | default([]) | length == 0
 
     - name: Verify snapshot name is available
-      ansible.builtin.fail:
+      fail:
         msg: "No snapshot name available for verification - snapshot_name_expected is undefined"
       when: snapshot_name_expected is not defined
 
     - name: Create dynamic inventory group for snapshot verification
-      ansible.builtin.add_host:
+      add_host:
         hostname: "{{ item }}"
         groups: "verify_targets"
         vm_folder: "{{ vm_folder_map[item] | default('') }}"
@@ -55,12 +55,12 @@
       register: snapinfo
       delegate_to: localhost
       failed_when: false
-      when:
+      when: 
         - not (vm_info_refresh.failed | default(false))
         - vm_info_refresh.instance is defined
 
     - name: Check if expected snapshot exists
-      ansible.builtin.set_fact:
+      set_fact:
         snapshot_found: >-
           {{
             not (snapinfo.failed | default(false)) and
@@ -70,16 +70,16 @@
       when: snapinfo is defined
 
     - name: Record successful verification results
-      ansible.builtin.set_stats:
+      set_stats:
         data:
           verify_success_hosts: "{{ verify_success_hosts | default([]) + [inventory_hostname] }}"
         aggregate: true
         per_host: false
-      when:
+      when: 
         - snapshot_found | default(false)
 
     - name: Record failed verification results
-      ansible.builtin.set_stats:
+      set_stats:
         data:
           verify_failed_hosts: "{{ verify_failed_hosts | default([]) + [inventory_hostname] }}"
           verify_failure_reasons: >-
@@ -90,11 +90,11 @@
             }}
         aggregate: true
         per_host: false
-      when:
+      when: 
         - not (snapshot_found | default(false))
 
     - name: Display verification results for this host
-      ansible.builtin.debug:
+      debug:
         msg: |
           Host: {{ inventory_hostname }}
           VM Info Refresh: {{ 'SUCCESS' if not (vm_info_refresh.failed | default(false)) else 'FAILED' }}
@@ -102,8 +102,7 @@
           Expected Snapshot: {{ snapshot_name_expected }}
           Snapshot Found: {{ snapshot_found | default(false) }}
           {% if not (snapshot_found | default(false)) %}
-          Available Snapshots: >-
-            {{ (snapinfo.guest_snapshots.snapshots | default([]) | map(attribute='name') | list) if snapinfo is defined else 'Unable to query' }}
+          Available Snapshots: {{ (snapinfo.guest_snapshots.snapshots | default([]) | map(attribute='name') | list) if snapinfo is defined else 'Unable to query' }}
           {% endif %}
 
 - name: Verification phase summary
@@ -111,33 +110,16 @@
   gather_facts: false
   run_once: true
   tasks:
-    - name: Calculate verification metrics safely
-      ansible.builtin.set_fact:
-        total_targets: "{{ snapshot_success_hosts | default([]) | length }}"
-        total_verified: "{{ verify_success_hosts | default([]) | length }}"
-        total_verify_failed: "{{ verify_failed_hosts | default([]) | length }}"
-
-    - name: Calculate verification success percentage
-      ansible.builtin.set_fact:
-        verification_percentage: >-
-          {{
-            (total_targets | int > 0) |
-            ternary(
-              ((total_verified | int * 100.0) / (total_targets | int)) | round(1),
-              0.0
-            )
-          }}
-
     - name: Display verification summary
-      ansible.builtin.debug:
+      debug:
         msg: |
           ========================================
           VERIFICATION PHASE COMPLETED
           ========================================
-          Target Hosts: {{ total_targets }}
-          Verified: {{ total_verified }}
-          Failed: {{ total_verify_failed }}
-          Success Rate: {{ verification_percentage }}%
+          Target Hosts: {{ snapshot_success_hosts | default([]) | length }}
+          Verified: {{ verify_success_hosts | default([]) | length }}
+          Failed: {{ verify_failed_hosts | default([]) | length }}
+          Success Rate: {{ ((verify_success_hosts | default([]) | length) * 100.0 / (snapshot_success_hosts | default([]) | length)) | round(1) }}%
           Expected Snapshot: {{ snapshot_name_expected | default('Not defined') }}
           ========================================
           Verified Hosts: {{ verify_success_hosts | default([]) | join(', ') }}

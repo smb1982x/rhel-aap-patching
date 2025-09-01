@@ -8,12 +8,12 @@
   gather_facts: false
   tasks:
     - name: Check if discovery produced any successful hosts
-      ansible.builtin.fail:
+      fail:
         msg: "No hosts available for contact testing - discovery_success_hosts is empty"
       when: discovery_success_hosts | default([]) | length == 0
 
     - name: Create dynamic inventory group for contact testing
-      ansible.builtin.add_host:
+      add_host:
         hostname: "{{ item }}"
         groups: "contact_targets"
         vm_folder: "{{ vm_folder_map[item] | default('') }}"
@@ -28,7 +28,7 @@
     ansible_ssh_common_args: '-o ConnectTimeout=30 -o ConnectionAttempts=3 -o StrictHostKeyChecking=no'
   tasks:
     - name: Primary SSH connectivity test
-      ansible.builtin.wait_for_connection:
+      wait_for_connection:
         timeout: "{{ contact_timeout }}"
         delay: 5
       register: ssh_connectivity
@@ -37,7 +37,7 @@
       failed_when: false
 
     - name: Fallback connectivity test using ping module
-      ansible.builtin.ping:
+      ping:
       register: ping_connectivity
       ignore_errors: true
       ignore_unreachable: true
@@ -45,7 +45,7 @@
       when: ssh_connectivity.failed | default(false)
 
     - name: Record successful contact results
-      ansible.builtin.set_stats:
+      set_stats:
         data:
           contact_success_hosts: "{{ contact_success_hosts | default([]) + [inventory_hostname] }}"
           contact_method_map: >-
@@ -57,11 +57,11 @@
         aggregate: true
         per_host: false
       when: >
-        ssh_connectivity is succeeded or
+        ssh_connectivity is succeeded or 
         (ping_connectivity is defined and ping_connectivity is succeeded)
 
     - name: Record failed contact results
-      ansible.builtin.set_stats:
+      set_stats:
         data:
           contact_failed_hosts: "{{ contact_failed_hosts | default([]) + [inventory_hostname] }}"
           contact_failure_reasons: >-
@@ -77,7 +77,7 @@
         (ping_connectivity is not defined or ping_connectivity.failed | default(false))
 
     - name: Display contact test results for this host
-      ansible.builtin.debug:
+      debug:
         msg: |
           Host: {{ inventory_hostname }}
           SSH Test: {{ 'SUCCESS' if ssh_connectivity is succeeded else 'FAILED' }}
@@ -94,33 +94,16 @@
   gather_facts: false
   run_once: true
   tasks:
-    - name: Calculate success rate safely
-      ansible.builtin.set_fact:
-        total_tested: "{{ discovery_success_hosts | default([]) | length }}"
-        total_successful: "{{ contact_success_hosts | default([]) | length }}"
-        total_failed: "{{ contact_failed_hosts | default([]) | length }}"
-
-    - name: Calculate success percentage
-      ansible.builtin.set_fact:
-        success_percentage: >-
-          {{
-            (total_tested | int > 0) |
-            ternary(
-              ((total_successful | int * 100.0) / (total_tested | int)) | round(1),
-              0.0
-            )
-          }}
-
     - name: Display contact testing summary
-      ansible.builtin.debug:
+      debug:
         msg: |
           ========================================
           CONTACT PHASE COMPLETED
           ========================================
-          Tested Hosts: {{ total_tested }}
-          Successful: {{ total_successful }}
-          Failed: {{ total_failed }}
-          Success Rate: {{ success_percentage }}%
+          Tested Hosts: {{ discovery_success_hosts | default([]) | length }}
+          Successful: {{ contact_success_hosts | default([]) | length }}
+          Failed: {{ contact_failed_hosts | default([]) | length }}
+          Success Rate: {{ ((contact_success_hosts | default([]) | length) * 100.0 / (discovery_success_hosts | default([]) | length)) | round(1) }}%
           ========================================
           Contactable Hosts: {{ contact_success_hosts | default([]) | join(', ') }}
           Failed Hosts: {{ contact_failed_hosts | default([]) | join(', ') }}

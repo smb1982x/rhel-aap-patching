@@ -1,23 +1,49 @@
 ---
 # JOB TEMPLATE NOTE:
+# - Inventory: RHEL Linux fleet  
 # - Expects contact_success_hosts from previous workflow step
+# - Extra vars expected: vcenter_server, vcenter_user, vcenter_pass, datacenter_name
+#   Optional: vmware_validate_certs, snapshot_label, snapshot_quiesce, snapshot_memory_dump,
+#            snapshot_async_timeout, snapshot_poll_interval, snapshot_name_expected
 # - Creates VM snapshots with proper error handling
+
+- name: Calculate snapshot name for this workflow run
+  hosts: localhost
+  gather_facts: false
+  run_once: true
+  tasks:
+    - name: Generate snapshot name if not provided
+      set_fact:
+        calculated_snapshot_name: >-
+          {{
+            snapshot_name_expected | default('automated-snapshot_' ~ 
+            (snapshot_label | default('Patching')) ~ '_' ~ 
+            lookup('pipe','date +%Y%m%d-%H%M%S'))
+          }}
+
+    - name: Store snapshot name globally
+      set_stats:
+        data:
+          snapshot_name_expected: "{{ calculated_snapshot_name }}"
+        aggregate: true
+        per_host: false
 
 - name: Validate hosts available for snapshot creation
   hosts: localhost
   gather_facts: false
   tasks:
     - name: Check if contact testing produced any successful hosts
-      ansible.builtin.fail:
+      fail:
         msg: "No hosts available for snapshot creation - contact_success_hosts is empty"
       when: contact_success_hosts | default([]) | length == 0
 
     - name: Create dynamic inventory group for snapshot creation
-      ansible.builtin.add_host:
+      add_host:
         hostname: "{{ item }}"
         groups: "snapshot_targets"
         vm_folder: "{{ vm_folder_map[item] | default('') }}"
         vm_name_resolved: "{{ vm_name_map[item] | default(item) }}"
+        snapshot_name_expected: "{{ hostvars['localhost']['calculated_snapshot_name'] }}"
       loop: "{{ contact_success_hosts | default([]) }}"
 
 - name: Take concurrent VM snapshots and wait for completion
@@ -26,11 +52,12 @@
   vars:
     vmware_validate_certs: "{{ vmware_validate_certs | default(true) }}"
     snapshot_label: "{{ snapshot_label | default('Patching') }}"
-    snapshot_name_expected: "{{ snapshot_name_expected | default('automated-snapshot_' ~ snapshot_label ~ '_' ~ lookup('pipe','date +%Y%m%d-%H%M%S')) }}"
     snapshot_quiesce: "{{ snapshot_quiesce | default(false) }}"
     snapshot_memory_dump: "{{ snapshot_memory_dump | default(true) }}"
     snapshot_async_timeout: "{{ snapshot_async_timeout | default(10800) }}"  # 3h
     snapshot_poll_interval: "{{ snapshot_poll_interval | default(60) }}"     # seconds
+    # Simplified: Use single authoritative source
+    resolved_snapshot_name: "{{ hostvars['localhost']['calculated_snapshot_name'] }}"
   tasks:
     - name: Refresh VM folder/name information from vCenter
       community.vmware.vmware_guest_info:
@@ -54,7 +81,7 @@
         folder: "{{ vm_info_refresh.instance.hw_folder | default(vm_folder) }}"
         name: "{{ vm_info_refresh.instance.hw_name | default(vm_name_resolved) }}"
         state: present
-        snapshot_name: "{{ snapshot_name_expected }}"
+        snapshot_name: "{{ resolved_snapshot_name }}"
         quiesce: "{{ snapshot_quiesce }}"
         memory_dump: "{{ snapshot_memory_dump }}"
       async: "{{ snapshot_async_timeout }}"
@@ -62,12 +89,12 @@
       register: snap_async
       delegate_to: localhost
       failed_when: false
-      when:
+      when: 
         - not (vm_info_refresh.failed | default(false))
         - vm_info_refresh.instance is defined
 
     - name: Wait for snapshot creation to complete
-      ansible.builtin.async_status:
+      async_status:
         jid: "{{ snap_async.ansible_job_id }}"
       register: snap_wait
       until: (snap_wait.finished | default(0)) | int == 1
@@ -78,7 +105,7 @@
       when: snap_async.ansible_job_id is defined
 
     - name: Cleanup async job files
-      ansible.builtin.async_status:
+      async_status:
         jid: "{{ snap_async.ansible_job_id }}"
         mode: cleanup
       delegate_to: localhost
@@ -87,13 +114,13 @@
       when: snap_async.ansible_job_id is defined
 
     - name: Record successful snapshot results
-      ansible.builtin.set_stats:
+      set_stats:
         data:
           snapshot_success_hosts: "{{ snapshot_success_hosts | default([]) + [inventory_hostname] }}"
           snapshot_name_map: >-
             {{
               snapshot_name_map | default({}) | combine({
-                inventory_hostname: snapshot_name_expected
+                inventory_hostname: resolved_snapshot_name
               })
             }}
         aggregate: true
@@ -101,11 +128,11 @@
       when: >
         snap_async.ansible_job_id is defined and
         not (snap_wait.failed | default(false)) and
-        (snap_wait.rc | default(1)) == 0 and
+        (snap_wait.finished | default(0)) | int == 1 and
         not (snap_async.failed | default(false))
 
     - name: Record failed snapshot results
-      ansible.builtin.set_stats:
+      set_stats:
         data:
           snapshot_failed_hosts: "{{ snapshot_failed_hosts | default([]) + [inventory_hostname] }}"
           snapshot_failure_reasons: >-
@@ -117,37 +144,37 @@
         aggregate: true
         per_host: false
       when: >
-        vm_info_refresh.failed | default(false) or
-        snap_async.failed | default(false) or
-        snap_wait.failed | default(false) or
-        (snap_wait.rc | default(1)) != 0
+        (vm_info_refresh.failed | default(false)) or
+        (snap_async.failed | default(false)) or
+        (snap_wait.failed | default(false)) or
+        (snap_async.ansible_job_id is defined and (snap_wait.finished | default(0)) | int != 1)
+
+    - name: Store per-host VM facts for later workflow steps
+      when: 
+        - not (vm_info_refresh.failed | default(false))
+        - vm_info_refresh.instance is defined
+      ansible.builtin.set_fact:
+        vm_folder: "{{ vm_info_refresh.instance.hw_folder }}"
+        vm_name_resolved: "{{ vm_info_refresh.instance.hw_name | default(hostvars[inventory_hostname].vm_name | default(inventory_hostname)) }}"
 
     - name: Display snapshot results for this host
-      ansible.builtin.debug:
+      debug:
         msg: |
-          Host:{{ inventory_hostname }}
+          Host: {{ inventory_hostname }}
           VM Info Refresh: {{ 'SUCCESS' if not (vm_info_refresh.failed | default(false)) else 'FAILED' }}
-          {% set snapshot_success = (snap_async.ansible_job_id is defined and not (snap_wait.failed | default(false)) and (snap_wait.rc | default(1)) == 0) %}
-          Snapshot Creation: {{ 'SUCCESS' if snapshot_success else 'FAILED' }}
-          Snapshot Name: {{ snapshot_name_expected }}
+          Snapshot Creation: {{ 'SUCCESS' if (snap_async.ansible_job_id is defined and not (snap_wait.failed | default(false)) and (snap_wait.finished | default(0)) | int == 1) else 'FAILED' }}
+          Snapshot Name: {{ resolved_snapshot_name }}
           {% if snap_wait.failed | default(false) or snap_async.failed | default(false) %}
           Error: {{ snap_wait.stderr | default(snap_async.msg | default('Unknown error')) }}
           {% endif %}
 
-- name: Store snapshot name for later workflow steps
+- name: Display snapshot phase summary
   hosts: localhost
   gather_facts: false
   run_once: true
   tasks:
-    - name: Publish snapshot name for verification step
-      ansible.builtin.set_stats:
-        data:
-          snapshot_name_expected: "{{ snapshot_name_expected }}"
-        aggregate: true
-        per_host: false
-
     - name: Display snapshot phase summary
-      ansible.builtin.debug:
+      debug:
         msg: |
           ========================================
           SNAPSHOT PHASE COMPLETED
@@ -155,12 +182,8 @@
           Target Hosts: {{ contact_success_hosts | default([]) | length }}
           Successful: {{ snapshot_success_hosts | default([]) | length }}
           Failed: {{ snapshot_failed_hosts | default([]) | length }}
-          {% if contact_success_hosts | default([]) | length > 0 %}
           Success Rate: {{ ((snapshot_success_hosts | default([]) | length) * 100.0 / (contact_success_hosts | default([]) | length)) | round(1) }}%
-          {% else %}
-          Success Rate: 0%
-          {% endif %}
-          Snapshot Name: {{ snapshot_name_expected | default('Not created') }}
+          Snapshot Name: {{ hostvars['localhost']['calculated_snapshot_name'] }}
           ========================================
           Successful Hosts: {{ snapshot_success_hosts | default([]) | join(', ') }}
           Failed Hosts: {{ snapshot_failed_hosts | default([]) | join(', ') }}
