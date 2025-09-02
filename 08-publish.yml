@@ -39,11 +39,24 @@
           - gitlab_token is defined and gitlab_token != ""
           - gitlab_repo_url.startswith('https://')
           - source_report_dir is defined and source_report_dir != ""
+          - gitlab_user_name is defined and gitlab_user_name != ""
+          - gitlab_user_email is defined and gitlab_user_email != ""
+          - publish_base_path is defined and publish_base_path != ""
         fail_msg: |
           Missing or invalid required variables:
             - gitlab_repo_url must be HTTPS URL (e.g., https://gitlab.company.com/user/repo.git)
             - gitlab_token must be valid GitLab access token
             - source_report_dir must exist from previous report step
+            - gitlab_user_name and gitlab_user_email must be provided
+
+    - name: Validate source report paths
+      assert:
+        that:
+          - source_report_dir != ""
+          - not source_report_dir.startswith("/tmp/")  # Prevent temp path issues
+          - ex_run_date is defined
+          - ex_run_ts is defined
+        fail_msg: "Invalid source report paths or missing execution metadata"
 
     - name: Debug incoming report variables
       debug:
@@ -82,36 +95,59 @@
         recurse: true
       register: html_files
 
+    - name: Validate that reports were found
+      assert:
+        that:
+          - (csv_files.files | length) > 0 or (html_files.files | length) > 0
+        fail_msg: "No CSV or HTML reports found in {{ source_report_dir }}"
+
+    - name: Ensure git is configured globally (fallback)
+      shell: |
+        git config --global user.name "{{ gitlab_user_name }}" 2>/dev/null || true
+        git config --global user.email "{{ gitlab_user_email }}" 2>/dev/null || true
+      changed_when: false
+      ignore_errors: true
+
     - name: Ensure local repo parent directory exists
       file:
         path: "{{ repo_local_path | dirname }}"
         state: directory
         mode: "0755"
+        recurse: true
 
     - name: Check if repo already exists (has .git)
       stat:
         path: "{{ repo_local_path }}/.git"
       register: repo_stat
 
-    - name: Clone repo using access token (first time)
+    - name: Clone or update GitLab repository
       git:
         repo: "{{ gitlab_auth_url }}"
         dest: "{{ repo_local_path }}"
         version: "{{ gitlab_branch }}"
+        update: true
         force: true
-      when: not repo_stat.stat.exists
-      register: git_clone
+        accept_hostkey: true
+        depth: 1  # Shallow clone for efficiency
+      register: git_operation
       no_log: true  # Hide token from logs
+      retries: 3
+      delay: 5
+      until: git_operation is succeeded
 
-    - name: Pull latest changes using access token
-      git:
-        repo: "{{ gitlab_auth_url }}"
-        dest: "{{ repo_local_path }}"
-        version: "{{ gitlab_branch }}"
-        force: true
-      when: repo_stat.stat.exists
-      register: git_pull
-      no_log: true  # Hide token from logs
+    - name: Verify Git operation succeeded
+      fail:
+        msg: "Git operation failed: {{ git_operation.msg | default('Unknown git error') }}"
+      when: 
+        - git_operation is defined
+        - git_operation.failed | default(false)
+
+    - name: Configure Git identity for this repo
+      shell: |
+        cd "{{ repo_local_path }}"
+        git config user.name "{{ gitlab_user_name }}"
+        git config user.email "{{ gitlab_user_email }}"
+      changed_when: false
 
     - name: Ensure publication folder for this run exists
       file:
@@ -127,6 +163,7 @@
         mode: "0644"
       loop: "{{ csv_files.files }}"
       when: csv_files.files | length > 0
+      register: csv_copy_results
 
     - name: Copy HTML report files to GitLab repo
       copy:
@@ -135,6 +172,7 @@
         mode: "0644"
       loop: "{{ html_files.files }}"
       when: html_files.files | length > 0
+      register: html_copy_results
 
     - name: Create per-run README index (Markdown)
       copy:
@@ -143,7 +181,7 @@
         content: |
           # AAP Patch Workflow Report - {{ ex_run_ts | default(ansible_date_time.epoch) }}
 
-          **Generated:** {{ lookup('pipe', 'date -Iseconds') }}
+          **Generated:** {{ lookup('pipe', 'date -Iseconds') | default(ansible_date_time.iso8601) }}
           **Workflow Execution:** {{ ex_run_date | default(ansible_date_time.date) }} {{ ex_run_ts | default(ansible_date_time.epoch) }}
 
           ## Files in this Report
@@ -160,14 +198,14 @@
 
           ## Workflow Statistics
 
-          {% if health_success_hosts is defined and health_failed_hosts is defined %}
-          - **Total Hosts:** {{ (health_success_hosts | length) + (health_failed_hosts | length) }}
-          - **Successful:** {{ health_success_hosts | length }} ({{ ((health_success_hosts | length) * 100.0 / ((health_success_hosts | length) + (health_failed_hosts | length))) | round(1) }}%)
-          - **Failed:** {{ health_failed_hosts | length }} ({{ ((health_failed_hosts | length) * 100.0 / ((health_success_hosts | length) + (health_failed_hosts | length))) | round(1) }}%)
+          {% if ansible_stats.data.health_success_hosts is defined and ansible_stats.data.health_failed_hosts is defined %}
+          - **Total Hosts:** {{ (ansible_stats.data.health_success_hosts | default([]) | length) + (ansible_stats.data.health_failed_hosts | default([]) | length) }}
+          - **Successful:** {{ ansible_stats.data.health_success_hosts | default([]) | length }} ({{ ((ansible_stats.data.health_success_hosts | default([]) | length) * 100.0 / ((ansible_stats.data.health_success_hosts | default([]) | length) + (ansible_stats.data.health_failed_hosts | default([]) | length))) | round(1) if ((ansible_stats.data.health_success_hosts | default([]) | length) + (ansible_stats.data.health_failed_hosts | default([]) | length)) > 0 else 0.0 }}%)
+          - **Failed:** {{ ansible_stats.data.health_failed_hosts | default([]) | length }} ({{ ((ansible_stats.data.health_failed_hosts | default([]) | length) * 100.0 / ((ansible_stats.data.health_success_hosts | default([]) | length) + (ansible_stats.data.health_failed_hosts | default([]) | length))) | round(1) if ((ansible_stats.data.health_success_hosts | default([]) | length) + (ansible_stats.data.health_failed_hosts | default([]) | length)) > 0 else 0.0 }}%)
           {% endif %}
 
-          {% if snapshot_name_expected is defined %}
-          - **Snapshot Name:** `{{ snapshot_name_expected }}`
+          {% if ansible_stats.data.snapshot_name_expected is defined %}
+          - **Snapshot Name:** `{{ ansible_stats.data.snapshot_name_expected }}`
           {% endif %}
 
           ## Navigation
@@ -177,19 +215,7 @@
 
           ---
           *Generated by AAP Patch Automation*
-
-    # Configure Git identity for this repo (idempotent; does not expose secrets)
-    - name: Set Git user.name for this repo
-      shell: |
-        cd "{{ repo_local_path }}"
-        git config user.name "{{ gitlab_user_name }}"
-      changed_when: false
-
-    - name: Set Git user.email for this repo
-      shell: |
-        cd "{{ repo_local_path }}"
-        git config user.email "{{ gitlab_user_email }}"
-      changed_when: false
+      register: readme_create_result
 
     - name: Publish to GitLab (stage, commit, push, report)
       block:
@@ -198,6 +224,7 @@
             cd "{{ repo_local_path }}"
             git add --all "{{ publish_base_path }}/{{ ex_run_date | default(ansible_date_time.date) }}/{{ ex_run_ts | default(ansible_date_time.epoch) }}/"
           changed_when: false
+          register: git_add_result
 
         - name: Detect if any staged changes exist
           shell: |
@@ -207,6 +234,19 @@
           changed_when: false
           failed_when: false
 
+        - name: Show what will be committed
+          shell: |
+            cd "{{ repo_local_path }}"
+            git diff --staged --name-status
+          register: staged_files
+          changed_when: false
+          when: staged.stdout == "CHANGED"
+
+        - name: Display staged files
+          debug:
+            msg: "Files to be committed: {{ staged_files.stdout_lines | default([]) | join(', ') }}"
+          when: staged.stdout == "CHANGED"
+
         - name: Commit staged changes (only when needed)
           shell: |
             cd "{{ repo_local_path }}"
@@ -214,10 +254,12 @@
 
             - Generated {{ csv_files.files | length }} CSV file(s)
             - Generated {{ html_files.files | length }} HTML report(s)
-            {% if health_success_hosts is defined and health_failed_hosts is defined -%}
-            - Processed {{ (health_success_hosts | length) + (health_failed_hosts | length) }} total host(s)
-            - {{ health_success_hosts | length }} successful, {{ health_failed_hosts | length }} failed
-            {%- endif %}"
+            {% if ansible_stats.data.health_success_hosts is defined and ansible_stats.data.health_failed_hosts is defined -%}
+            - Processed {{ (ansible_stats.data.health_success_hosts | default([]) | length) + (ansible_stats.data.health_failed_hosts | default([]) | length) }} total host(s)
+            - {{ ansible_stats.data.health_success_hosts | default([]) | length }} successful, {{ ansible_stats.data.health_failed_hosts | default([]) | length }} failed
+            {%- endif %}
+            
+            Automated by: {{ gitlab_user_name }} <{{ gitlab_user_email }}>"
           when: staged.stdout == "CHANGED"
           register: git_commit
           changed_when: >
@@ -231,10 +273,21 @@
           when: staged.stdout == "CHANGED"
           register: git_push
           no_log: true
+          retries: 3
+          delay: 10
+          until: git_push is succeeded
           changed_when: >
             git_push.rc == 0 and
             (git_push.stdout is not search('Everything up-to-date'))
           failed_when: git_push.rc != 0
+
+        - name: Verify push operation
+          debug:
+            msg: |
+              Push operation completed:
+              - Return code: {{ git_push.rc | default('N/A') }}
+              - Output: {{ git_push.stdout | default('No output') }}
+          when: staged.stdout == "CHANGED"
 
         - name: Calculate GitLab URLs for this run
           set_fact:
@@ -250,9 +303,11 @@
             data:
               gitlab_report_url: "{{ gitlab_base_url }}/-/tree/{{ gitlab_branch }}/{{ report_web_path }}"
               gitlab_html_url: "{{ gitlab_base_url }}/-/blob/{{ gitlab_branch }}/{{ report_web_path }}/{{ report_html_name }}"
+              gitlab_raw_html_url: "{{ gitlab_base_url }}/-/raw/{{ gitlab_branch }}/{{ report_web_path }}/{{ report_html_name }}"
               gitlab_base_url: "{{ gitlab_base_url }}"
               publish_status: "success"
-              published_files_count: "{{ (csv_files.files | length) + (html_files.files | length) }}"
+              published_files_count: "{{ (csv_files.files | length) + (html_files.files | length) + 1 }}"  # +1 for README
+              files_committed: "{{ 'true' if staged.stdout == 'CHANGED' else 'false' }}"
             aggregate: true
             per_host: false
 
@@ -265,18 +320,33 @@
               Repository: {{ gitlab_repo_url }}
               Branch: {{ gitlab_branch }}
               Report Path: {{ report_web_path }}
-              View Reports: {{ gitlab_base_url }}/-/tree/{{ gitlab_branch }}/{{ report_web_path }}
-              HTML Report: {{ gitlab_base_url }}/-/blob/{{ gitlab_branch }}/{{ report_web_path }}/{{ report_html_name }}
-              Files Published: {{ csv_files.files | length }} CSV, {{ html_files.files | length }} HTML
-              Published: {{ lookup('pipe', 'date -Iseconds') }}
+              
+              📊 View Reports: {{ gitlab_base_url }}/-/tree/{{ gitlab_branch }}/{{ report_web_path }}
+              📄 HTML Report: {{ gitlab_base_url }}/-/blob/{{ gitlab_branch }}/{{ report_web_path }}/{{ report_html_name }}
+              🔗 Direct HTML: {{ gitlab_base_url }}/-/raw/{{ gitlab_branch }}/{{ report_web_path }}/{{ report_html_name }}
+              
+              Files Published: {{ csv_files.files | length }} CSV, {{ html_files.files | length }} HTML, 1 README
+              Changes Committed: {{ 'Yes' if staged.stdout == 'CHANGED' else 'No (no changes detected)' }}
+              Published: {{ lookup('pipe', 'date -Iseconds') | default(ansible_date_time.iso8601) }}
               ========================================
 
       rescue:
+        - name: Capture detailed error information
+          set_fact:
+            error_details: |
+              Git operation error details:
+              - ansible_failed_result: {{ ansible_failed_result | default({}) | to_nice_json }}
+              - git_operation: {{ git_operation | default({}) | to_nice_json }}
+              - git_add_result: {{ git_add_result | default({}) | to_nice_json }}
+              - git_commit: {{ git_commit | default({}) | to_nice_json }}
+              - git_push: {{ git_push | default({}) | to_nice_json }}
+
         - name: Mark publication failure (set_stats)
           set_stats:
             data:
               publish_status: "failed"
               publish_error: "{{ ansible_failed_result.msg | default('Unknown error during GitLab publication') }}"
+              publish_error_details: "{{ error_details }}"
             aggregate: true
             per_host: false
 
@@ -289,7 +359,11 @@
               Error: {{ ansible_failed_result.msg | default('Unknown error') }}
               Repo: {{ gitlab_repo_url }}
               Branch: {{ gitlab_branch }}
-              Time: {{ lookup('pipe', 'date -Iseconds') }}
+              Local Path: {{ repo_local_path }}
+              Time: {{ lookup('pipe', 'date -Iseconds') | default(ansible_date_time.iso8601) }}
+              
+              Error Details:
+              {{ error_details | default('No additional details available') }}
               ========================================
 
         - name: Re-raise failure to stop workflow
@@ -297,6 +371,18 @@
             msg: "GitLab publication failed: {{ ansible_failed_result.msg | default('Unknown error') }}"
 
       always:
+        - name: List files that were staged (for debugging)
+          shell: |
+            cd "{{ repo_local_path }}" 2>/dev/null && find "{{ publish_base_path }}/{{ ex_run_date | default(ansible_date_time.date) }}/{{ ex_run_ts | default(ansible_date_time.epoch) }}" -type f 2>/dev/null || echo "Directory not accessible"
+          register: final_files
+          ignore_errors: true
+          changed_when: false
+
+        - name: Show final file list
+          debug:
+            msg: "Files in publication directory: {{ final_files.stdout_lines | default(['None found']) }}"
+          ignore_errors: true
+
         - name: Cleanup temporary repository
           file:
             path: "{{ repo_local_path }}"
@@ -305,4 +391,6 @@
 
         - name: Final publication status
           debug:
-            msg: "Publish status: {{ publish_status | default('unknown') }}"
+            msg: |
+              Final Status: {{ publish_status | default('unknown') }}
+              Cleanup completed for: {{ repo_local_path }}

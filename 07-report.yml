@@ -5,16 +5,32 @@
 
 - name: Build HTML summary report and CSV files
   hosts: localhost
-  gather_facts: false
+  gather_facts: true  # Enable facts for ansible_date_time
   ignore_errors: true      # KEY FIX: Never fail report generation
   any_errors_fatal: false  # KEY FIX: Always complete reporting
   vars:
     wf_report_root: "{{ (ansible_env.HOME | default('/runner')) ~ '/aap_reports' }}"
-    wf_run_date: "{{ lookup('pipe', 'date +%Y-%m-%d') }}"
-    wf_run_ts: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+    wf_run_date: "{{ lookup('pipe', 'date +%Y-%m-%d') | default(ansible_date_time.date) }}"
+    wf_run_ts: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') | default(ansible_date_time.epoch) }}"
     wf_report_dir: "{{ wf_report_root }}/reports_{{ wf_run_date | regex_replace('-', '') }}"
     wf_report_file: "{{ wf_report_dir }}/aap_patch_report_{{ wf_run_ts }}.html"
+  
   tasks:
+    - name: Validate critical report paths
+      assert:
+        that:
+          - wf_report_root is defined
+          - wf_report_root != ""
+          - wf_report_dir is defined
+          - wf_report_dir != ""
+          - wf_report_file is defined
+          - wf_report_file != ""
+          - wf_run_date is defined
+          - wf_run_ts is defined
+        fail_msg: "Invalid or missing report directory paths"
+      ignore_errors: true
+      failed_when: false
+
     - name: Debug available workflow statistics
       debug:
         msg: |
@@ -35,6 +51,7 @@
         path: "{{ wf_report_dir }}"
         state: directory
         mode: "0755"
+        recurse: true  # Ensure parent directories are created
       ignore_errors: true
       failed_when: false
 
@@ -88,6 +105,17 @@
       ignore_errors: true
       failed_when: false
 
+    - name: Validate calculated statistics
+      assert:
+        that:
+          - total_hosts is defined
+          - total_hosts | int >= 0
+          - overall_success is defined
+          - overall_failure is defined
+        fail_msg: "Failed to calculate workflow statistics properly"
+      ignore_errors: true
+      failed_when: false
+
     - name: Generate CSV files for engineers
       copy:
         dest: "{{ wf_report_dir }}/{{ item.name }}.csv"
@@ -116,6 +144,7 @@
         - { name: "overall_failure", hosts: "{{ overall_failure }}" }
       ignore_errors: true
       failed_when: false
+      when: item.hosts | length > 0  # Only create files with data
 
     - name: Compose enhanced report content
       set_fact:
@@ -141,17 +170,18 @@
               .status-badge{padding:4px 8px;border-radius:4px;font-size:0.8em;font-weight:600}
               .badge-success{background:#d4edda;color:#155724} .badge-failure{background:#f8d7da;color:#721c24}
               .host-list{font-size:0.9em;color:#495057;margin-top:8px;max-height:100px;overflow-y:auto}
+              .error{background:#f8d7da;border:1px solid #f5c6cb;color:#721c24;padding:12px;border-radius:6px;margin:12px 0}
             </style>
           </head><body>
             <div class="container">
             <h1>AAP Patch Workflow Report</h1>
-            <div class="timestamp">Generated: {{ lookup('pipe','date -Iseconds') }} | Run ID: {{ wf_run_ts }}</div>
+            <div class="timestamp">Generated: {{ lookup('pipe','date -Iseconds') | default(ansible_date_time.iso8601) }} | Run ID: {{ wf_run_ts }}</div>
 
             <div class="card summary">
               <h2>Executive Summary</h2>
               <div class="metric-row">
                 <span>Total Hosts Processed:</span>
-                <span><strong>{{ total_hosts }}</strong></span>
+                <span><strong>{{ total_hosts | int }}</strong></span>
               </div>
               <div class="metric-row">
                 <span>Successfully Completed Entire Workflow:</span>
@@ -165,6 +195,11 @@
               <div class="metric-row">
                 <span>Snapshot Name Created:</span>
                 <span><code>{{ ansible_stats.data.snapshot_name_expected }}</code></span>
+              </div>
+              {% endif %}
+              {% if total_hosts | int == 0 %}
+              <div class="error">
+                <strong>Warning:</strong> No hosts were processed in this workflow execution.
               </div>
               {% endif %}
             </div>
@@ -342,7 +377,7 @@
               </div>
               <div class="metric-row">
                 <span>Report Generation Time:</span>
-                <span>{{ lookup('pipe','date -Iseconds') }}</span>
+                <span>{{ lookup('pipe','date -Iseconds') | default(ansible_date_time.iso8601) }}</span>
               </div>
               <div class="metric-row">
                 <span>Total Execution Duration:</span>
@@ -354,25 +389,25 @@
                 <span>Patch Methods Used:</span>
                 <span>
                   {% set methods = ansible_stats.data.patch_method_map.values() | unique | list %}
-                  {{ methods | join(', ') }}
+                  {{ methods | join(', ') if methods | length > 0 else 'None detected' }}
                 </span>
               </div>
               {% endif %}
             </div>
 
-            {% if ansible_stats.data.patch_repos_used is defined %}
+            {% if ansible_stats.data.patch_repos_used is defined and patch_success | length > 0 %}
             <div class="card">
               <h2>Repository Usage Summary</h2>
               {% for host in patch_success %}
               <div class="metric-row">
                 <span>{{ host }}:</span>
-                <span><code>{{ ansible_stats.data.patch_repos_used[host] | default([]) | join(', ') }}</code></span>
+                <span><code>{{ ansible_stats.data.patch_repos_used[host] | default([]) | join(', ') | default('No repos recorded') }}</code></span>
               </div>
               {% endfor %}
             </div>
             {% endif %}
 
-            {% if ansible_stats.data.health_details_map is defined %}
+            {% if ansible_stats.data.health_details_map is defined and health_success | length > 0 %}
             <div class="card">
               <h2>System Health Details</h2>
               {% for host in health_success %}
@@ -401,6 +436,13 @@
         mode: "0644"
       ignore_errors: true
       failed_when: false
+      register: report_write_result
+
+    - name: Verify report file was created
+      stat:
+        path: "{{ wf_report_file }}"
+      register: report_file_stat
+      ignore_errors: true
 
     - name: Show where the report was saved
       debug:
@@ -409,8 +451,9 @@
           REPORT GENERATION COMPLETED
           ========================================
           Report Location: {{ wf_report_file }}
+          Report Exists: {{ report_file_stat.stat.exists | default(false) }}
           CSV Directory: {{ wf_report_dir }}/
-          Successfully Completed: {{ overall_success | length }}/{{ total_hosts }}
+          Successfully Completed: {{ overall_success | length }}/{{ total_hosts | int }}
           Overall Success Rate: {{ ((overall_success | length) * 100.0 / (total_hosts | int)) | round(1) if (total_hosts | int) > 0 else 0.0 }}%
           ========================================
           Data Sources:
