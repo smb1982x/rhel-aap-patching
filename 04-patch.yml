@@ -6,6 +6,7 @@
 - name: Validate hosts available for patching
   hosts: localhost
   gather_facts: false
+  any_errors_fatal: false  # Don't let validation errors stop the workflow
   tasks:
     - name: Check if verification produced any successful hosts
       fail:
@@ -17,41 +18,75 @@
         hostname: "{{ item }}"
         groups: "patch_targets"
         # Set ansible_remote_tmp at host level for proper precedence
-        ansible_remote_tmp: "/opt/ansible-temp/{{ ansible_user | default(ansible_ssh_user | default('ansible')) }}"
+        ansible_remote_tmp: "/tmp/ansible-temp/{{ ansible_user | default(ansible_ssh_user | default('srv_serviceaccount')) }}"
       loop: "{{ verify_success_hosts | default([]) }}"
+      ignore_errors: true  # Continue even if some hosts can't be added
 
 - name: Prepare remote temp directory for Ansible operations
   hosts: patch_targets
   gather_facts: false
   become: true
+  ignore_unreachable: true  # KEY FIX: Continue if hosts are unreachable
+  ignore_errors: true       # KEY FIX: Continue if tasks fail
+  any_errors_fatal: false   # KEY FIX: Don't let one host failure stop others
   tasks:
     - name: Create Ansible temp base directory
       file:
-        path: "/opt/ansible-temp"
+        path: "/tmp/ansible-temp"
         state: directory
-        mode: '1777'  # Sticky bit + world writable
+        mode: '0700'  # Changed from 1777 to 0700 for better security
         owner: root
         group: root
       failed_when: false
+      ignore_errors: true
 
     - name: Create user-specific temp directory
       file:
-        path: "/opt/ansible-temp/{{ ansible_user | default(ansible_ssh_user | default('ansible')) }}"
+        path: "/tmp/ansible-temp/{{ ansible_user | default(ansible_ssh_user | default('srv_serviceaccount')) }}"
         state: directory
         mode: '0755'
-        owner: "{{ ansible_user | default(ansible_ssh_user | default('ansible')) }}"
-        group: "{{ ansible_user | default(ansible_ssh_user | default('ansible')) }}"
+        owner: "{{ ansible_user | default(ansible_ssh_user | default('srv_serviceaccount')) }}"
+        group: "{{ ansible_user | default(ansible_ssh_user | default('srv_serviceaccount')) }}"
       failed_when: false
+      ignore_errors: true
 
 - name: Patch servers with specific repository control
   hosts: patch_targets
   gather_facts: true  # Need facts for OS version detection
   become: true
+  ignore_unreachable: true  # KEY FIX: Handle unreachable hosts gracefully
+  ignore_errors: true       # KEY FIX: Handle task failures gracefully  
+  any_errors_fatal: false   # KEY FIX: Prevent one host from stopping others
   vars:
     patch_async_timeout: "{{ patch_async_timeout | default(14400) }}"  # 4h
     patch_poll_interval: "{{ patch_poll_interval | default(60) }}"
     patch_strategy: "{{ patch_strategy | default('auto') }}"  # auto, conditional, package_only
   tasks:
+    # Initialize host tracking variables at start
+    - name: Initialize patch tracking for this host
+      set_fact:
+        host_patch_attempted: true
+        host_patch_successful: false
+        host_patch_error: ""
+        host_available: true
+      ignore_errors: true
+      failed_when: false
+
+    - name: Mark host as unreachable if facts gathering failed
+      block:
+        - name: Test if we can gather basic facts
+          setup:
+          register: facts_result
+          ignore_errors: true
+          failed_when: false
+      rescue:
+        - name: Mark host as unreachable
+          set_fact:
+            host_available: false
+            host_patch_error: "Host unreachable - unable to gather facts"
+          ignore_errors: true
+          failed_when: false
+
     - name: Determine RHEL version and set repository list
       set_fact:
         rhel_repos: >-
@@ -74,30 +109,49 @@
           {%- else -%}
           
           {%- endif -%}
+      when: host_available | default(true)
+      ignore_errors: true
+      failed_when: false
 
     - name: Display detected system information
       debug:
         msg: |
           Host: {{ inventory_hostname }}
-          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
-          Major Version: {{ ansible_distribution_major_version }}
+          Available: {{ host_available | default(true) }}
+          OS: {{ ansible_distribution | default('Unknown') }} {{ ansible_distribution_version | default('Unknown') }}
+          Major Version: {{ ansible_distribution_major_version | default('Unknown') }}
           Package Manager: {{ ansible_facts.pkg_mgr | default('unknown') }}
           Strategy: {{ patch_strategy }}
           Temp Directory: {{ ansible_remote_tmp }}
-          Repositories: {{ rhel_repos }}
-          Repo Args: {{ repo_args }}
+          Repositories: {{ rhel_repos | default([]) }}
+          Repo Args: {{ repo_args | default('') }}
+      ignore_errors: true
+      failed_when: false
 
     - name: Ensure temp directory exists and is accessible
       file:
         path: "{{ ansible_remote_tmp }}"
         state: directory
         mode: '0755'
+      when: host_available | default(true)
+      ignore_errors: true
       failed_when: false
 
-    - name: Fail if RHEL version is not supported
-      fail:
-        msg: "Unsupported RHEL version: {{ ansible_distribution_major_version }}. Only RHEL 6, 7, 8, and 9 are supported."
-      when: ansible_distribution_major_version | int not in [6, 7, 8, 9]
+    - name: Check if RHEL version is supported
+      block:
+        - name: Validate RHEL version
+          fail:
+            msg: "Unsupported RHEL version: {{ ansible_distribution_major_version }}. Only RHEL 6, 7, 8, and 9 are supported."
+          when: 
+            - host_available | default(true)
+            - ansible_distribution_major_version | int not in [6, 7, 8, 9]
+      rescue:
+        - name: Record unsupported version error
+          set_fact:
+            host_available: false
+            host_patch_error: "Unsupported RHEL version: {{ ansible_distribution_major_version | default('Unknown') }}"
+          ignore_errors: true
+          failed_when: false
 
     # Strategy 1: Use DNF with specific repositories (RHEL 8/9)
     - name: Start package update using DNF with specific repositories
@@ -105,8 +159,10 @@
       async: "{{ patch_async_timeout }}"
       poll: 0
       register: dnf_repo_async
+      ignore_errors: true
       failed_when: false
       when:
+        - host_available | default(true)
         - patch_strategy in ['auto', 'conditional', 'package_only']
         - ansible_distribution_major_version | int in [8, 9]
         - ansible_facts.pkg_mgr in ['dnf']
@@ -118,8 +174,12 @@
       until: (dnf_repo_wait.finished | default(0)) | int == 1
       retries: "{{ (patch_async_timeout | int // patch_poll_interval | int) + 1 }}"
       delay: "{{ patch_poll_interval | int }}"
+      ignore_errors: true
       failed_when: false
-      when: dnf_repo_async is defined and dnf_repo_async.ansible_job_id is defined
+      when: 
+        - host_available | default(true)
+        - dnf_repo_async is defined 
+        - dnf_repo_async.ansible_job_id is defined
 
     # Strategy 2: Use YUM with specific repositories (RHEL 6/7 or fallback)
     - name: Start package update using YUM with specific repositories
@@ -127,8 +187,10 @@
       async: "{{ patch_async_timeout }}"
       poll: 0
       register: yum_repo_async
+      ignore_errors: true
       failed_when: false
       when: >
+        host_available | default(true) and
         patch_strategy in ['auto', 'conditional', 'package_only'] and
         (
           ansible_distribution_major_version | int in [6, 7] or
@@ -144,34 +206,41 @@
       until: (yum_repo_wait.finished | default(0)) | int == 1
       retries: "{{ (patch_async_timeout | int // patch_poll_interval | int) + 1 }}"
       delay: "{{ patch_poll_interval | int }}"
+      ignore_errors: true
       failed_when: false
-      when: yum_repo_async is defined and yum_repo_async.ansible_job_id is defined
+      when: 
+        - host_available | default(true)
+        - yum_repo_async is defined 
+        - yum_repo_async.ansible_job_id is defined
 
-    # Cleanup async job files
+    # Cleanup async job files - always try to clean up
     - name: Cleanup async job files
       async_status:
         jid: "{{ item }}"
         mode: cleanup
       changed_when: false
+      ignore_errors: true
       failed_when: false
       loop:
         - "{{ dnf_repo_async.ansible_job_id | default('') }}"
         - "{{ yum_repo_async.ansible_job_id | default('') }}"
       when: item != ''
 
-    # Determine overall patch result
+    # Determine overall patch result - this logic is improved
     - name: Calculate patch result
       set_fact:
         patch_result_status: >-
           {{
-            (
-              (dnf_repo_wait.finished | default(0)) | int == 1 and 
-              not (dnf_repo_wait.failed | default(false)) and
-              (dnf_repo_wait.rc | default(1)) == 0
-            ) or (
-              (yum_repo_wait.finished | default(0)) | int == 1 and 
-              not (yum_repo_wait.failed | default(false)) and
-              (yum_repo_wait.rc | default(1)) == 0
+            host_available | default(true) and (
+              (
+                (dnf_repo_wait.finished | default(0)) | int == 1 and 
+                not (dnf_repo_wait.failed | default(false)) and
+                (dnf_repo_wait.rc | default(1)) == 0
+              ) or (
+                (yum_repo_wait.finished | default(0)) | int == 1 and 
+                not (yum_repo_wait.failed | default(false)) and
+                (yum_repo_wait.rc | default(1)) == 0
+              )
             )
           }}
         patch_method: >-
@@ -180,9 +249,23 @@
               (dnf_repo_wait.finished | default(0)) | int == 1 and 
               not (dnf_repo_wait.failed | default(false)) and
               (dnf_repo_wait.rc | default(1)) == 0
-            ) else 'yum'
+            ) else 'yum' if (
+              (yum_repo_wait.finished | default(0)) | int == 1 and 
+              not (yum_repo_wait.failed | default(false)) and
+              (yum_repo_wait.rc | default(1)) == 0
+            ) else 'none'
           }}
+        patch_error_detail: >-
+          {{
+            'Host unreachable' if not (host_available | default(true)) else
+            dnf_repo_wait.stderr | default('') if dnf_repo_wait is defined else
+            yum_repo_wait.stderr | default('') if yum_repo_wait is defined else
+            host_patch_error | default('Unknown error')
+          }}
+      ignore_errors: true
+      failed_when: false
 
+    # Always record results - both successful and failed
     - name: Record successful patch results
       set_stats:
         data:
@@ -196,12 +279,14 @@
           patch_repos_used: >-
             {{
               patch_repos_used | default({}) | combine({
-                inventory_hostname: rhel_repos
+                inventory_hostname: rhel_repos | default([])
               })
             }}
         aggregate: true
         per_host: false
       when: patch_result_status | default(false)
+      ignore_errors: true
+      failed_when: false
 
     - name: Record failed patch results
       set_stats:
@@ -210,40 +295,56 @@
           patch_failure_reasons: >-
             {{
               patch_failure_reasons | default({}) | combine({
-                inventory_hostname: dnf_repo_wait.stderr | default(yum_repo_wait.stderr | default('Unknown patching error'))
+                inventory_hostname: patch_error_detail
               })
             }}
         aggregate: true
         per_host: false
       when: not (patch_result_status | default(false))
+      ignore_errors: true
+      failed_when: false
 
     - name: Display patch result for this host
       debug:
         msg: |
           Host: {{ inventory_hostname }}
-          RHEL Version: {{ ansible_distribution_major_version }}
+          Available: {{ host_available | default(true) }}
+          RHEL Version: {{ ansible_distribution_major_version | default('Unknown') }}
           Patch Status: {{ patch_result_status | default(false) | ternary('SUCCESS', 'FAILED') }}
           Method Used: {{ patch_method }}
-          Repositories Used: {{ rhel_repos | join(', ') }}
+          Repositories Used: {{ rhel_repos | default([]) | join(', ') }}
           {% if not (patch_result_status | default(false)) %}
-          Error: {{ dnf_repo_wait.stderr | default(yum_repo_wait.stderr | default('Unknown error')) }}
+          Error: {{ patch_error_detail }}
           {% endif %}
+      ignore_errors: true
+      failed_when: false
 
 - name: Patch phase summary
   hosts: localhost
   gather_facts: false
   run_once: true
+  ignore_errors: true      # KEY FIX: Never fail the summary
+  any_errors_fatal: false  # KEY FIX: Ensure workflow continues
   tasks:
+    - name: Calculate final statistics
+      set_fact:
+        total_hosts: "{{ verify_success_hosts | default([]) | length }}"
+        successful_hosts: "{{ ansible_stats.data.patch_success_hosts | default([]) | length }}"
+        failed_hosts: "{{ ansible_stats.data.patch_failed_hosts | default([]) | length }}"
+        success_rate: "{{ ((ansible_stats.data.patch_success_hosts | default([]) | length) * 100.0 / (verify_success_hosts | default([]) | length)) | round(1) if (verify_success_hosts | default([]) | length) > 0 else 0.0 }}"
+      ignore_errors: true
+      failed_when: false
+
     - name: Display patching summary
       debug:
         msg: |
           ========================================
           PATCH PHASE COMPLETED
           ========================================
-          Target Hosts: {{ verify_success_hosts | default([]) | length }}
-          Successful: {{ ansible_stats.data.patch_success_hosts | default([]) | length }}
-          Failed: {{ ansible_stats.data.patch_failed_hosts | default([]) | length }}
-          Success Rate: {{ ((ansible_stats.data.patch_success_hosts | default([]) | length) * 100.0 / (verify_success_hosts | default([]) | length)) | round(1) }}%
+          Target Hosts: {{ total_hosts }}
+          Successful: {{ successful_hosts }}
+          Failed: {{ failed_hosts }}
+          Success Rate: {{ success_rate }}%
           ========================================
           Successful Hosts: {{ ansible_stats.data.patch_success_hosts | default([]) | join(', ') }}
           Failed Hosts: {{ ansible_stats.data.patch_failed_hosts | default([]) | join(', ') }}
@@ -252,4 +353,20 @@
           {% for host in ansible_stats.data.patch_success_hosts | default([]) %}
           - {{ host }}: {{ ansible_stats.data.patch_repos_used[host] | default([]) | join(', ') }}
           {% endfor %}
+          {% if ansible_stats.data.patch_failed_hosts | default([]) | length > 0 %}
           ========================================
+          Failure Details:
+          {% for host in ansible_stats.data.patch_failed_hosts | default([]) %}
+          - {{ host }}: {{ ansible_stats.data.patch_failure_reasons[host] | default('Unknown error') }}
+          {% endfor %}
+          {% endif %}
+          ========================================
+      ignore_errors: true
+      failed_when: false
+
+    # KEY FIX: Always signal success to continue workflow
+    - name: Signal workflow success regardless of individual host failures
+      debug:
+        msg: "Patch phase completed. Workflow will continue to next step."
+      ignore_errors: true
+      failed_when: false
