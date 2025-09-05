@@ -24,19 +24,20 @@
       delegate_to: localhost
       failed_when: false
 
+    # For DISCOVERY (first step), start with empty lists - don't reference ansible_stats.data yet
     - name: Store successful VM discovery results
       set_stats:
         data:
-          discovery_success_hosts: "{{ ansible_stats.data.discovery_success_hosts | default([]) + [inventory_hostname] }}"
+          discovery_success_hosts: "{{ ((ansible_stats.data | default({})).discovery_success_hosts | default([])) + [inventory_hostname] }}"
           vm_folder_map: >-
             {{
-              ansible_stats.data.vm_folder_map | default({}) | combine({
+              ((ansible_stats.data | default({})).vm_folder_map | default({})) | combine({
                 inventory_hostname: vm_info.instance.hw_folder
               })
             }}
           vm_name_map: >-
             {{
-              ansible_stats.data.vm_name_map | default({}) | combine({
+              ((ansible_stats.data | default({})).vm_name_map | default({})) | combine({
                 inventory_hostname: vm_info.instance.hw_name | default(hostvars[inventory_hostname].vm_name | default(inventory_hostname))
               })
             }}
@@ -50,10 +51,10 @@
     - name: Store failed VM discovery results
       set_stats:
         data:
-          discovery_failed_hosts: "{{ ansible_stats.data.discovery_failed_hosts | default([]) + [inventory_hostname] }}"
+          discovery_failed_hosts: "{{ ((ansible_stats.data | default({})).discovery_failed_hosts | default([])) + [inventory_hostname] }}"
           discovery_failure_reasons: >-
             {{
-              ansible_stats.data.discovery_failure_reasons | default({}) | combine({
+              ((ansible_stats.data | default({})).discovery_failure_reasons | default({})) | combine({
                 inventory_hostname: vm_info.msg | default('VM not found or accessible in vCenter')
               })
             }}
