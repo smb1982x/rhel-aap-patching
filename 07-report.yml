@@ -1,33 +1,65 @@
 ---
 # JOB TEMPLATE NOTE:
-# - Inventory can be localhost-only (but any will work)
-# - Generates comprehensive HTML and CSV reports from workflow statistics
+# - Inventory: localhost only
+# - Extra vars required: gitlab_repo_url, gitlab_token
+# - Optional: gitlab_branch, gitlab_user_name, gitlab_user_email, publish_base_path
+# - Generates comprehensive HTML and CSV reports AND publishes them to GitLab
 
-- name: Build HTML summary report and CSV files
+- name: Build and publish HTML summary report and CSV files
   hosts: localhost
-  gather_facts: true  # Enable facts for ansible_date_time
-  ignore_errors: true      # KEY FIX: Never fail report generation
-  any_errors_fatal: false  # KEY FIX: Always complete reporting
+  gather_facts: true
+  ignore_errors: true
+  any_errors_fatal: false
   vars:
+    # Report generation variables
     wf_report_root: "{{ (ansible_env.HOME | default('/runner')) ~ '/aap_reports' }}"
-    wf_run_date: "{{ lookup('pipe', 'date +%Y-%m-%d') | default(ansible_date_time.date) }}"
-    wf_run_ts: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') | default(ansible_date_time.epoch) }}"
+    wf_run_date: "{{ ansible_date_time.date }}"
+    wf_run_ts: "{{ ansible_date_time.epoch }}"
     wf_report_dir: "{{ wf_report_root }}/reports_{{ wf_run_date | regex_replace('-', '') }}"
     wf_report_file: "{{ wf_report_dir }}/aap_patch_report_{{ wf_run_ts }}.html"
+    
+    # GitLab publishing variables
+    gitlab_repo_url: "{{ gitlab_repo_url | mandatory }}"
+    gitlab_token: "{{ gitlab_token | mandatory }}"
+    gitlab_branch: "{{ gitlab_branch | default('main') }}"
+    gitlab_user_name: "{{ gitlab_user_name | default('AAP Automation') }}"
+    gitlab_user_email: "{{ gitlab_user_email | default('aap-automation@company.com') }}"
+    publish_base_path: "{{ publish_base_path | default('patch-reports') }}"
+    
+    # Local repository path for GitLab operations
+    repo_local_path: "/tmp/gitlab_repo_{{ wf_run_ts }}"
+
+    # Construct authenticated GitLab URL (OAuth token for HTTPS)
+    gitlab_auth_url: >-
+      {{
+        gitlab_repo_url | regex_replace('^https://', 'https://oauth2:' + gitlab_token + '@')
+        if gitlab_repo_url.startswith('https://')
+        else gitlab_repo_url
+      }}
   
   tasks:
+    # ===========================================
+    # REPORT GENERATION SECTION
+    # ===========================================
+    
+    - name: Create consistent display timestamp
+      set_fact:
+        wf_display_ts: "{{ '%Y%m%d-%H%M%S' | strftime(wf_run_ts | int) }}"
+        wf_iso_ts: "{{ '%Y-%m-%dT%H:%M:%S+00:00' | strftime(wf_run_ts | int) }}"
+      ignore_errors: true
+      failed_when: false
+
     - name: Validate critical report paths
       assert:
         that:
-          - wf_report_root is defined
-          - wf_report_root != ""
-          - wf_report_dir is defined
-          - wf_report_dir != ""
-          - wf_report_file is defined
-          - wf_report_file != ""
+          - wf_report_root is defined and wf_report_root != ""
+          - wf_report_dir is defined and wf_report_dir != ""
+          - wf_report_file is defined and wf_report_file != ""
           - wf_run_date is defined
           - wf_run_ts is defined
-        fail_msg: "Invalid or missing report directory paths"
+          - gitlab_repo_url is defined and gitlab_repo_url != ""
+          - gitlab_token is defined and gitlab_token != ""
+        fail_msg: "Invalid or missing required variables for report generation or GitLab publishing"
       ignore_errors: true
       failed_when: false
 
@@ -51,26 +83,12 @@
         path: "{{ wf_report_dir }}"
         state: directory
         mode: "0755"
-        recurse: true  # Ensure parent directories are created
-      ignore_errors: true
-      failed_when: false
-
-    - name: Export report paths to workflow
-      set_stats:
-        data:
-          ex_report_root: "{{ wf_report_root }}"
-          ex_report_dir:  "{{ wf_report_dir }}"
-          ex_report_file: "{{ wf_report_file }}"
-          ex_run_date: "{{ wf_run_date }}"
-          ex_run_ts: "{{ wf_run_ts }}"          
-        aggregate: true
-        per_host: false
+        recurse: true
       ignore_errors: true
       failed_when: false
 
     - name: Calculate overall success and failure lists
       set_fact:
-        # KEY FIX: Access data from ansible_stats.data instead of direct variables
         discovery_success: "{{ ansible_stats.data.discovery_success_hosts | default([]) }}"
         discovery_failed: "{{ ansible_stats.data.discovery_failed_hosts | default([]) }}"
         contact_success: "{{ ansible_stats.data.contact_success_hosts | default([]) }}"
@@ -105,17 +123,6 @@
       ignore_errors: true
       failed_when: false
 
-    - name: Validate calculated statistics
-      assert:
-        that:
-          - total_hosts is defined
-          - total_hosts | int >= 0
-          - overall_success is defined
-          - overall_failure is defined
-        fail_msg: "Failed to calculate workflow statistics properly"
-      ignore_errors: true
-      failed_when: false
-
     - name: Generate CSV files for engineers
       copy:
         dest: "{{ wf_report_dir }}/{{ item.name }}.csv"
@@ -144,7 +151,7 @@
         - { name: "overall_failure", hosts: "{{ overall_failure }}" }
       ignore_errors: true
       failed_when: false
-      when: item.hosts | length > 0  # Only create files with data
+      register: csv_generation_result
 
     - name: Compose enhanced report content
       set_fact:
@@ -152,7 +159,7 @@
           <!doctype html>
           <html lang="en"><head>
             <meta charset="utf-8" />
-            <title>AAP Patch Workflow Report - {{ wf_run_ts }}</title>
+            <title>AAP Patch Workflow Report - {{ wf_display_ts }}</title>
             <style>
               body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:24px;background:#f8f9fa}
               .container{max-width:1200px;margin:0 auto;background:white;padding:24px;border-radius:12px;box-shadow:0 4px 6px rgba(0,0,0,.1)}
@@ -175,7 +182,7 @@
           </head><body>
             <div class="container">
             <h1>AAP Patch Workflow Report</h1>
-            <div class="timestamp">Generated: {{ lookup('pipe','date -Iseconds') | default(ansible_date_time.iso8601) }} | Run ID: {{ wf_run_ts }}</div>
+            <div class="timestamp">Generated: {{ wf_iso_ts }} | Run ID: {{ wf_display_ts }}</div>
 
             <div class="card summary">
               <h2>Executive Summary</h2>
@@ -360,12 +367,16 @@
 
             <div class="card">
               <h2>Engineering Resources</h2>
-              <p>The following CSV files have been generated in <code>{{ wf_report_dir }}</code> for detailed analysis:</p>
+              <p>The following CSV files have been generated and published to GitLab for detailed analysis:</p>
               <ul>
-                <li><strong>Phase-specific reports:</strong> Success/failure lists for each workflow step</li>
-                <li><strong>overall_success.csv:</strong> Hosts that completed the entire workflow successfully</li>
-                <li><strong>overall_failure.csv:</strong> Hosts that failed at any stage</li>
-                <li><strong>Complete audit trail:</strong> All intermediate results for troubleshooting</li>
+                <li><strong>discovery_success.csv / discovery_failure.csv</strong> - Host discovery results</li>
+                <li><strong>contact_success.csv / contact_failure.csv</strong> - SSH connectivity test results</li>
+                <li><strong>snapshot_success.csv / snapshot_failure.csv</strong> - VM snapshot creation results</li>
+                <li><strong>verify_success.csv / verify_failure.csv</strong> - Pre-patch verification results</li>
+                <li><strong>patch_success.csv / patch_failure.csv</strong> - Patch installation results</li>
+                <li><strong>reboot_success.csv / reboot_failure.csv</strong> - System reboot results</li>
+                <li><strong>health_success.csv / health_failure.csv</strong> - Post-patch health check results</li>
+                <li><strong>overall_success.csv / overall_failure.csv</strong> - Final workflow completion status</li>
               </ul>
             </div>
 
@@ -377,11 +388,11 @@
               </div>
               <div class="metric-row">
                 <span>Report Generation Time:</span>
-                <span>{{ lookup('pipe','date -Iseconds') | default(ansible_date_time.iso8601) }}</span>
+                <span>{{ wf_iso_ts }}</span>
               </div>
               <div class="metric-row">
                 <span>Total Execution Duration:</span>
-                <span>{{ wf_run_ts }} series</span>
+                <span>{{ wf_display_ts }} series</span>
               </div>
               
               {% if ansible_stats.data.patch_method_map is defined %}
@@ -438,13 +449,21 @@
       failed_when: false
       register: report_write_result
 
+    - name: Wait for file system sync
+      pause:
+        seconds: 1
+      when: report_write_result.changed
+
     - name: Verify report file was created
       stat:
         path: "{{ wf_report_file }}"
       register: report_file_stat
       ignore_errors: true
+      retries: 3
+      delay: 1
+      until: report_file_stat.stat.exists | default(false)
 
-    - name: Show where the report was saved
+    - name: Debug report generation status
       debug:
         msg: |
           ========================================
@@ -456,21 +475,317 @@
           Successfully Completed: {{ overall_success | length }}/{{ total_hosts | int }}
           Overall Success Rate: {{ ((overall_success | length) * 100.0 / (total_hosts | int)) | round(1) if (total_hosts | int) > 0 else 0.0 }}%
           ========================================
-          Data Sources:
-          - Discovery: {{ discovery_success | length }} success, {{ discovery_failed | length }} failed
-          - Contact: {{ contact_success | length }} success, {{ contact_failed | length }} failed  
-          - Snapshot: {{ snapshot_success | length }} success, {{ snapshot_failed | length }} failed
-          - Verify: {{ verify_success | length }} success, {{ verify_failed | length }} failed
-          - Patch: {{ patch_success | length }} success, {{ patch_failed | length }} failed
-          - Reboot: {{ reboot_success | length }} success, {{ reboot_failed | length }} failed
-          - Health: {{ health_success | length }} success, {{ health_failed | length }} failed
-          ========================================
       ignore_errors: true
       failed_when: false
 
-    # KEY FIX: Always signal success so workflow continues
-    - name: Signal report generation success
+    # ===========================================
+    # GITLAB PUBLISHING SECTION
+    # ===========================================
+
+    - name: Find CSV report files
+      find:
+        paths: "{{ wf_report_dir }}"
+        patterns: "*.csv"
+        recurse: true
+      register: csv_files
+
+    - name: Find HTML report files
+      find:
+        paths: "{{ wf_report_dir }}"
+        patterns: "*.html"
+        recurse: true
+      register: html_files
+
+    - name: Debug found files for publishing
       debug:
-        msg: "Report generation completed successfully. Ready for publication step."
+        msg:
+          - "CSV files found: {{ csv_files.files | length }}"
+          - "HTML files found: {{ html_files.files | length }}"
+          - "CSV file list: {{ csv_files.files | map(attribute='path') | list }}"
+          - "HTML file list: {{ html_files.files | map(attribute='path') | list }}"
+
+    - name: Validate that reports were found for publishing
+      assert:
+        that:
+          - (csv_files.files | length) > 0 or (html_files.files | length) > 0
+        fail_msg: "No CSV or HTML reports found in {{ wf_report_dir }} for publishing"
+
+    - name: Ensure git is configured globally
+      shell: |
+        git config --global user.name "{{ gitlab_user_name }}" 2>/dev/null || true
+        git config --global user.email "{{ gitlab_user_email }}" 2>/dev/null || true
+      changed_when: false
+      ignore_errors: true
+
+    - name: Ensure local repo parent directory exists
+      file:
+        path: "{{ repo_local_path | dirname }}"
+        state: directory
+        mode: "0755"
+        recurse: true
+
+    - name: Clone or update GitLab repository
+      git:
+        repo: "{{ gitlab_auth_url }}"
+        dest: "{{ repo_local_path }}"
+        version: "{{ gitlab_branch }}"
+        update: true
+        force: true
+        accept_hostkey: true
+        depth: 1
+      register: git_operation
+      no_log: true
+      retries: 3
+      delay: 5
+      until: git_operation is succeeded
+
+    - name: Verify Git operation succeeded
+      fail:
+        msg: "Git operation failed: {{ git_operation.msg | default('Unknown git error') }}"
+      when: 
+        - git_operation is defined
+        - git_operation.failed | default(false)
+
+    - name: Configure Git identity for this repo
+      shell: |
+        cd "{{ repo_local_path }}"
+        git config user.name "{{ gitlab_user_name }}"
+        git config user.email "{{ gitlab_user_email }}"
+      changed_when: false
+
+    - name: Ensure publication folder for this run exists
+      file:
+        path: "{{ repo_local_path }}/{{ publish_base_path }}/{{ wf_run_date | regex_replace('-', '') }}/{{ wf_run_ts }}"
+        state: directory
+        mode: "0755"
+        recurse: true
+
+    - name: Copy CSV files to GitLab repo
+      copy:
+        src: "{{ item.path }}"
+        dest: "{{ repo_local_path }}/{{ publish_base_path }}/{{ wf_run_date | regex_replace('-', '') }}/{{ wf_run_ts }}/{{ item.path | basename }}"
+        mode: "0644"
+      loop: "{{ csv_files.files }}"
+      when: csv_files.files | length > 0
+      register: csv_copy_results
+
+    - name: Copy HTML report files to GitLab repo
+      copy:
+        src: "{{ item.path }}"
+        dest: "{{ repo_local_path }}/{{ publish_base_path }}/{{ wf_run_date | regex_replace('-', '') }}/{{ wf_run_ts }}/{{ item.path | basename }}"
+        mode: "0644"
+      loop: "{{ html_files.files }}"
+      when: html_files.files | length > 0
+      register: html_copy_results
+
+    - name: Create per-run README index
+      copy:
+        dest: "{{ repo_local_path }}/{{ publish_base_path }}/{{ wf_run_date | regex_replace('-', '') }}/{{ wf_run_ts }}/README.md"
+        mode: "0644"
+        content: |
+          # AAP Patch Workflow Report - {{ wf_display_ts }}
+
+          **Generated:** {{ wf_iso_ts }}
+          **Workflow Execution:** {{ wf_run_date }} {{ wf_display_ts }}
+
+          ## Files in this Report
+
+          ### Summary Reports
+          {% for file in html_files.files %}
+          - **[{{ file.path | basename }}]({{ file.path | basename }})** - Executive summary with success rates and phase breakdown
+          {% endfor %}
+
+          ### Detailed CSV Reports (Engineering Data)
+          {% for file in csv_files.files %}
+          - **{{ file.path | basename }}** - {{ file.path | basename | replace('_', ' ') | replace('.csv', '') | title }} host list
+          {% endfor %}
+
+          ## Workflow Statistics
+
+          - **Total Hosts:** {{ total_hosts }}
+          - **Successful:** {{ overall_success | length }} ({{ ((overall_success | length) * 100.0 / (total_hosts | int)) | round(1) if (total_hosts | int) > 0 else 0.0 }}%)
+          - **Failed:** {{ overall_failure | length }} ({{ ((overall_failure | length) * 100.0 / (total_hosts | int)) | round(1) if (total_hosts | int) > 0 else 0.0 }}%)
+
+          {% if ansible_stats.data.snapshot_name_expected is defined %}
+          - **Snapshot Name:** `{{ ansible_stats.data.snapshot_name_expected }}`
+          {% endif %}
+
+          ## Available CSV Files
+
+          The following CSV files contain detailed host lists for each workflow phase:
+
+          - **discovery_success.csv** / **discovery_failure.csv** - Host discovery results
+          - **contact_success.csv** / **contact_failure.csv** - SSH connectivity test results  
+          - **snapshot_success.csv** / **snapshot_failure.csv** - VM snapshot creation results
+          - **verify_success.csv** / **verify_failure.csv** - Pre-patch verification results
+          - **patch_success.csv** / **patch_failure.csv** - Patch installation results
+          - **reboot_success.csv** / **reboot_failure.csv** - System reboot results
+          - **health_success.csv** / **health_failure.csv** - Post-patch health check results
+          - **overall_success.csv** / **overall_failure.csv** - Final workflow completion status
+
+          ## Navigation
+
+          - **[Latest Reports](../)** - Browse other reports from {{ wf_run_date }}
+          - **[All Reports](../../)** - Browse all historical patch reports
+
+          ---
+          *Generated by AAP Patch Automation*
+      register: readme_create_result
+
+    - name: Publish to GitLab (stage, commit, push)
+      block:
+        - name: Stage all changes for commit
+          shell: |
+            cd "{{ repo_local_path }}"
+            git add --all "{{ publish_base_path }}/{{ wf_run_date | regex_replace('-', '') }}/{{ wf_run_ts }}/"
+          changed_when: false
+          register: git_add_result
+
+        - name: Detect if any staged changes exist
+          shell: |
+            cd "{{ repo_local_path }}"
+            git diff --staged --quiet || echo "CHANGED"
+          register: staged
+          changed_when: false
+          failed_when: false
+
+        - name: Show what will be committed
+          shell: |
+            cd "{{ repo_local_path }}"
+            git diff --staged --name-status
+          register: staged_files
+          changed_when: false
+          when: staged.stdout == "CHANGED"
+
+        - name: Display staged files
+          debug:
+            msg: "Files to be committed: {{ staged_files.stdout_lines | default([]) | join(', ') }}"
+          when: staged.stdout == "CHANGED"
+
+        - name: Commit staged changes (only when needed)
+          shell: |
+            cd "{{ repo_local_path }}"
+            git commit -m "Automated publication for {{ wf_run_date }} {{ wf_display_ts }}
+
+            - Generated {{ csv_files.files | length }} CSV file(s)
+            - Generated {{ html_files.files | length }} HTML report(s)
+            - Processed {{ total_hosts }} total host(s)
+            - {{ overall_success | length }} successful, {{ overall_failure | length }} failed
+            
+            Automated by: {{ gitlab_user_name }} <{{ gitlab_user_email }}>"
+          when: staged.stdout == "CHANGED"
+          register: git_commit
+          changed_when: >
+            git_commit.rc == 0 and
+            (git_commit.stdout is search('file\\(s\\)? changed|insertion\\(s\\)?|deletion\\(s\\)?'))
+
+        - name: Push commit to GitLab using access token
+          shell: |
+            cd "{{ repo_local_path }}"
+            git push "{{ gitlab_auth_url }}" "{{ gitlab_branch }}"
+          when: staged.stdout == "CHANGED"
+          register: git_push
+          no_log: true
+          retries: 3
+          delay: 10
+          until: git_push is succeeded
+          changed_when: >
+            git_push.rc == 0 and
+            (git_push.stdout is not search('Everything up-to-date'))
+          failed_when: git_push.rc != 0
+
+        - name: Calculate GitLab URLs for this run
+          set_fact:
+            gitlab_base_url: "{{ gitlab_repo_url | regex_replace('\\.git$', '') }}"
+            report_web_path: "{{ publish_base_path }}/{{ wf_run_date | regex_replace('-', '') }}/{{ wf_run_ts }}"
+            report_html_name: >-
+              {{
+                (html_files.files | map(attribute='path') | map('basename') | list | first | default('report.html'))
+              }}
+
+        - name: Export final results to workflow
+          set_stats:
+            data:
+              gitlab_report_url: "{{ gitlab_base_url }}/-/tree/{{ gitlab_branch }}/{{ report_web_path }}"
+              gitlab_html_url: "{{ gitlab_base_url }}/-/blob/{{ gitlab_branch }}/{{ report_web_path }}/{{ report_html_name }}"
+              gitlab_raw_html_url: "{{ gitlab_base_url }}/-/raw/{{ gitlab_branch }}/{{ report_web_path }}/{{ report_html_name }}"
+              gitlab_base_url: "{{ gitlab_base_url }}"
+              publish_status: "success"
+              published_files_count: "{{ (csv_files.files | length) + (html_files.files | length) + 1 }}"
+              files_committed: "{{ 'true' if staged.stdout == 'CHANGED' else 'false' }}"
+              wf_report_dir: "{{ wf_report_dir }}"
+              wf_report_file: "{{ wf_report_file }}"
+              wf_run_date: "{{ wf_run_date }}"
+              wf_run_ts: "{{ wf_run_ts }}"
+              wf_display_ts: "{{ wf_display_ts }}"
+            aggregate: true
+            per_host: false
+
+        - name: Display publication results
+          debug:
+            msg: |
+              ========================================
+              PUBLICATION SUCCESSFUL
+              ========================================
+              Repository: {{ gitlab_repo_url }}
+              Branch: {{ gitlab_branch }}
+              Report Path: {{ report_web_path }}
+              
+              View Reports: {{ gitlab_base_url }}/-/tree/{{ gitlab_branch }}/{{ report_web_path }}
+              HTML Report: {{ gitlab_base_url }}/-/blob/{{ gitlab_branch }}/{{ report_web_path }}/{{ report_html_name }}
+              Direct HTML: {{ gitlab_base_url }}/-/raw/{{ gitlab_branch }}/{{ report_web_path }}/{{ report_html_name }}
+              
+              Files Published: {{ csv_files.files | length }} CSV, {{ html_files.files | length }} HTML, 1 README
+              Changes Committed: {{ 'Yes' if staged.stdout == 'CHANGED' else 'No (no changes detected)' }}
+              Published: {{ wf_iso_ts }}
+              
+              Local Files: {{ wf_report_dir }}/
+              ========================================
+
+      rescue:
+        - name: Mark publication failure
+          set_stats:
+            data:
+              publish_status: "failed"
+              publish_error: "{{ ansible_failed_result.msg | default('Unknown error during GitLab publication') }}"
+            aggregate: true
+            per_host: false
+
+        - name: Display failure information
+          debug:
+            msg: |
+              ========================================
+              PUBLICATION FAILED
+              ========================================
+              Error: {{ ansible_failed_result.msg | default('Unknown error') }}
+              Repo: {{ gitlab_repo_url }}
+              Branch: {{ gitlab_branch }}
+              Local Path: {{ repo_local_path }}
+              ========================================
+
+        # Don't fail the entire playbook - report generation was successful
+        - name: Continue despite publication failure
+          debug:
+            msg: "GitLab publication failed, but report generation was successful. Reports are available locally at {{ wf_report_dir }}/"
+
+      always:
+        - name: Cleanup temporary repository
+          file:
+            path: "{{ repo_local_path }}"
+            state: absent
+          ignore_errors: true
+
+    - name: Final completion status
+      debug:
+        msg: |
+          ========================================
+          WORKFLOW COMPLETION SUMMARY
+          ========================================
+          Report Generation: SUCCESS
+          Local Reports: {{ wf_report_dir }}/
+          GitLab Publication: {{ publish_status | default('unknown') }}
+          Total Files: {{ (csv_files.files | length) + (html_files.files | length) }} generated
+          Workflow Run: {{ wf_display_ts }}
+          ========================================
       ignore_errors: true
       failed_when: false
