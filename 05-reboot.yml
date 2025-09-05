@@ -10,13 +10,13 @@
     - name: Check if patching produced any successful hosts
       fail:
         msg: "No hosts available for reboot - patch_success_hosts is empty"
-      when: ansible_stats.data.patch_success_hosts | default([]) | length == 0
+      when: patch_success_hosts | default([]) | length == 0
 
     - name: Create dynamic inventory group for reboot
       add_host:
         hostname: "{{ item }}"
         groups: "reboot_targets"
-      loop: "{{ ansible_stats.data.patch_success_hosts | default([]) }}"
+      loop: "{{ patch_success_hosts | default([]) }}"
 
 - name: Reboot after patch
   hosts: reboot_targets
@@ -47,10 +47,10 @@
     - name: Record successful reboot results
       set_stats:
         data:
-          reboot_success_hosts: "{{ ansible_stats.data.reboot_success_hosts | default([]) + [inventory_hostname] }}"
+          reboot_success_hosts: "{{ reboot_success_hosts | default([]) + [inventory_hostname] }}"
           reboot_duration_map: >-
             {{
-              ansible_stats.data.reboot_duration_map | default({}) | combine({
+              reboot_duration_map | default({}) | combine({
                 inventory_hostname: reboot_result.elapsed | default(0)
               })
             }}
@@ -64,10 +64,10 @@
     - name: Record failed reboot results
       set_stats:
         data:
-          reboot_failed_hosts: "{{ ansible_stats.data.reboot_failed_hosts | default([]) + [inventory_hostname] }}"
+          reboot_failed_hosts: "{{ reboot_failed_hosts | default([]) + [inventory_hostname] }}"
           reboot_failure_reasons: >-
             {{
-              ansible_stats.data.reboot_failure_reasons | default({}) | combine({
+              reboot_failure_reasons | default({}) | combine({
                 inventory_hostname: reboot_result.msg | default('Reboot failed or connectivity lost')
               })
             }}
@@ -100,11 +100,11 @@
           ========================================
           REBOOT PHASE COMPLETED
           ========================================
-          Target Hosts: {{ ansible_stats.data.patch_success_hosts | default([]) | length }}
-          Successful: {{ ansible_stats.data.reboot_success_hosts | default([]) | length }}
-          Failed: {{ ansible_stats.data.reboot_failed_hosts | default([]) | length }}
-          Success Rate: {{ ((ansible_stats.data.reboot_success_hosts | default([]) | length) * 100.0 / (ansible_stats.data.patch_success_hosts | default([]) | length)) | round(1) }}%
+          Target Hosts: {{ patch_success_hosts | default([]) | length }}
+          Successful: {{ reboot_success_hosts | default([]) | length }}
+          Failed: {{ reboot_failed_hosts | default([]) | length }}
+          Success Rate: {{ ((reboot_success_hosts | default([]) | length) * 100.0 / (patch_success_hosts | default([]) | length)) | round(1) }}%
           ========================================
-          Successful Hosts: {{ ansible_stats.data.reboot_success_hosts | default([]) | join(', ') }}
-          Failed Hosts: {{ ansible_stats.data.reboot_failed_hosts | default([]) | join(', ') }}
+          Successful Hosts: {{ reboot_success_hosts | default([]) | join(', ') }}
+          Failed Hosts: {{ reboot_failed_hosts | default([]) | join(', ') }}
           ========================================

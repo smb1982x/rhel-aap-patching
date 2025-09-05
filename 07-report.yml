@@ -11,7 +11,7 @@
   ignore_errors: true
   any_errors_fatal: false
   vars:
-    # Report generation variables - FIX: Use consistent timestamp
+    # Report generation variables
     wf_report_root: "{{ (ansible_env.HOME | default('/runner')) ~ '/aap_reports' }}"
     wf_run_date: "{{ ansible_date_time.date }}"
     wf_run_ts: "{{ ansible_date_time.epoch }}"
@@ -38,34 +38,6 @@
       }}
   
   tasks:
-    # ===========================================
-    # DEBUG SECTION - Check workflow stats
-    # ===========================================
-    
-    - name: DEBUG - Check workflow stats availability
-      debug:
-        msg: |
-          ===========================================
-          WORKFLOW STATS DEBUG
-          ===========================================
-          ansible_stats defined: {{ ansible_stats is defined }}
-          ansible_stats.data defined: {{ ansible_stats.data is defined }}
-          ansible_stats.data keys: {{ ansible_stats.data.keys() | list if ansible_stats.data is defined else 'UNDEFINED' }}
-          
-          Expected keys check:
-          - discovery_success_hosts: {{ ansible_stats.data.discovery_success_hosts | default('MISSING') | length if ansible_stats.data is defined else 'NO_DATA' }}
-          - contact_success_hosts: {{ ansible_stats.data.contact_success_hosts | default('MISSING') | length if ansible_stats.data is defined else 'NO_DATA' }}
-          - snapshot_success_hosts: {{ ansible_stats.data.snapshot_success_hosts | default('MISSING') | length if ansible_stats.data is defined else 'NO_DATA' }}
-          - verify_success_hosts: {{ ansible_stats.data.verify_success_hosts | default('MISSING') | length if ansible_stats.data is defined else 'NO_DATA' }}
-          - patch_success_hosts: {{ ansible_stats.data.patch_success_hosts | default('MISSING') | length if ansible_stats.data is defined else 'NO_DATA' }}
-          - reboot_success_hosts: {{ ansible_stats.data.reboot_success_hosts | default('MISSING') | length if ansible_stats.data is defined else 'NO_DATA' }}
-          - health_success_hosts: {{ ansible_stats.data.health_success_hosts | default('MISSING') | length if ansible_stats.data is defined else 'NO_DATA' }}
-          
-          Full ansible_stats content: {{ ansible_stats if ansible_stats is defined else 'NOT_DEFINED' }}
-          ===========================================
-      ignore_errors: true
-      failed_when: false
-
     # ===========================================
     # REPORT GENERATION SECTION
     # ===========================================
@@ -811,7 +783,7 @@
           ========================================
           Report Generation: SUCCESS
           Local Reports: {{ wf_report_dir }}/
-          GitLab Publication: {{ ansible_stats.data.publish_status | default('unknown') }}
+          GitLab Publication: {{ publish_status | default('unknown') }}
           Total Files: {{ (csv_files.files | length) + (html_files.files | length) }} generated
           Workflow Run: {{ wf_display_ts }}
           ========================================

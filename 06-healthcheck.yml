@@ -12,14 +12,14 @@
     - name: Check if reboot produced any successful hosts
       fail:
         msg: "No hosts available for health checking - reboot_success_hosts is empty"
-      when: ansible_stats.data.reboot_success_hosts | default([]) | length == 0
+      when: reboot_success_hosts | default([]) | length == 0
       ignore_errors: true   # Let the workflow continue even if no hosts
 
     - name: Create dynamic inventory group for health checking
       add_host:
         hostname: "{{ item }}"
         groups: "health_targets"
-      loop: "{{ ansible_stats.data.reboot_success_hosts | default([]) }}"
+      loop: "{{ reboot_success_hosts | default([]) }}"
       ignore_errors: true
 
 - name: Post-patch health checks
@@ -139,10 +139,10 @@
     - name: Record successful health check results
       set_stats:
         data:
-          health_success_hosts: "{{ ansible_stats.data.health_success_hosts | default([]) + [inventory_hostname] }}"
+          health_success_hosts: "{{ health_success_hosts | default([]) + [inventory_hostname] }}"
           health_details_map: >-
             {{
-              ansible_stats.data.health_details_map | default({}) | combine({
+              health_details_map | default({}) | combine({
                 inventory_hostname: {
                   'disk_usage_ok': (disk_check.rc | default(1)) == 0,
                   'selinux_status': selinux_check.stdout | default('Unknown'),
@@ -161,10 +161,10 @@
     - name: Record failed health check results
       set_stats:
         data:
-          health_failed_hosts: "{{ ansible_stats.data.health_failed_hosts | default([]) + [inventory_hostname] }}"
+          health_failed_hosts: "{{ health_failed_hosts | default([]) + [inventory_hostname] }}"
           health_failure_details: >-
             {{
-              ansible_stats.data.health_failure_details | default({}) | combine({
+              health_failure_details | default({}) | combine({
                 inventory_hostname: {
                   'available': host_available | default(true),
                   'disk_usage_ok': (disk_check.rc | default(1)) == 0,
@@ -208,10 +208,10 @@
   tasks:
     - name: Calculate final health statistics
       set_fact:
-        total_health_hosts: "{{ ansible_stats.data.reboot_success_hosts | default([]) | length }}"
+        total_health_hosts: "{{ reboot_success_hosts | default([]) | length }}"
         successful_health_hosts: "{{ ansible_stats.data.health_success_hosts | default([]) | length }}"
         failed_health_hosts: "{{ ansible_stats.data.health_failed_hosts | default([]) | length }}"
-        health_success_rate: "{{ ((ansible_stats.data.health_success_hosts | default([]) | length) * 100.0 / (ansible_stats.data.reboot_success_hosts | default([]) | length)) | round(1) if (ansible_stats.data.reboot_success_hosts | default([]) | length) > 0 else 0.0 }}"
+        health_success_rate: "{{ ((ansible_stats.data.health_success_hosts | default([]) | length) * 100.0 / (reboot_success_hosts | default([]) | length)) | round(1) if (reboot_success_hosts | default([]) | length) > 0 else 0.0 }}"
       ignore_errors: true
       failed_when: false
 

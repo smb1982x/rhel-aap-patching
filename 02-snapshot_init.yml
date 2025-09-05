@@ -35,16 +35,16 @@
     - name: Check if contact testing produced any successful hosts
       fail:
         msg: "No hosts available for snapshot creation - contact_success_hosts is empty"
-      when: ansible_stats.data.contact_success_hosts | default([]) | length == 0
+      when: contact_success_hosts | default([]) | length == 0
 
     - name: Create dynamic inventory group for snapshot creation
       add_host:
         hostname: "{{ item }}"
         groups: "snapshot_targets"
-        vm_folder: "{{ ansible_stats.data.vm_folder_map[item] | default('') }}"
-        vm_name_resolved: "{{ ansible_stats.data.vm_name_map[item] | default(item) }}"
+        vm_folder: "{{ vm_folder_map[item] | default('') }}"
+        vm_name_resolved: "{{ vm_name_map[item] | default(item) }}"
         snapshot_name_expected: "{{ hostvars['localhost']['calculated_snapshot_name'] }}"
-      loop: "{{ ansible_stats.data.contact_success_hosts | default([]) }}"
+      loop: "{{ contact_success_hosts | default([]) }}"
 
 - name: Take concurrent VM snapshots and wait for completion
   hosts: snapshot_targets
@@ -116,10 +116,10 @@
     - name: Record successful snapshot results
       set_stats:
         data:
-          snapshot_success_hosts: "{{ ansible_stats.data.snapshot_success_hosts | default([]) + [inventory_hostname] }}"
+          snapshot_success_hosts: "{{ snapshot_success_hosts | default([]) + [inventory_hostname] }}"
           snapshot_name_map: >-
             {{
-              ansible_stats.data.snapshot_name_map | default({}) | combine({
+              snapshot_name_map | default({}) | combine({
                 inventory_hostname: resolved_snapshot_name
               })
             }}
@@ -134,10 +134,10 @@
     - name: Record failed snapshot results
       set_stats:
         data:
-          snapshot_failed_hosts: "{{ ansible_stats.data.snapshot_failed_hosts | default([]) + [inventory_hostname] }}"
+          snapshot_failed_hosts: "{{ snapshot_failed_hosts | default([]) + [inventory_hostname] }}"
           snapshot_failure_reasons: >-
             {{
-              ansible_stats.data.snapshot_failure_reasons | default({}) | combine({
+              snapshot_failure_reasons | default({}) | combine({
                 inventory_hostname: snap_wait.stderr | default(snap_async.msg | default('Unknown snapshot error'))
               })
             }}
@@ -179,12 +179,12 @@
           ========================================
           SNAPSHOT PHASE COMPLETED
           ========================================
-          Target Hosts: {{ ansible_stats.data.contact_success_hosts | default([]) | length }}
-          Successful: {{ ansible_stats.data.snapshot_success_hosts | default([]) | length }}
-          Failed: {{ ansible_stats.data.snapshot_failed_hosts | default([]) | length }}
-          Success Rate: {{ ((ansible_stats.data.snapshot_success_hosts | default([]) | length) * 100.0 / (ansible_stats.data.contact_success_hosts | default([]) | length)) | round(1) }}%
+          Target Hosts: {{ contact_success_hosts | default([]) | length }}
+          Successful: {{ snapshot_success_hosts | default([]) | length }}
+          Failed: {{ snapshot_failed_hosts | default([]) | length }}
+          Success Rate: {{ ((snapshot_success_hosts | default([]) | length) * 100.0 / (contact_success_hosts | default([]) | length)) | round(1) }}%
           Snapshot Name: {{ hostvars['localhost']['calculated_snapshot_name'] }}
           ========================================
-          Successful Hosts: {{ ansible_stats.data.snapshot_success_hosts | default([]) | join(', ') }}
-          Failed Hosts: {{ ansible_stats.data.snapshot_failed_hosts | default([]) | join(', ') }}
+          Successful Hosts: {{ snapshot_success_hosts | default([]) | join(', ') }}
+          Failed Hosts: {{ snapshot_failed_hosts | default([]) | join(', ') }}
           ========================================
