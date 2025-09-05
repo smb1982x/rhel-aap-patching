@@ -10,15 +10,15 @@
     - name: Check if discovery produced any successful hosts
       fail:
         msg: "No hosts available for contact testing - discovery_success_hosts is empty"
-      when: discovery_success_hosts | default([]) | length == 0
+      when: ansible_stats.data.discovery_success_hosts | default([]) | length == 0
 
     - name: Create dynamic inventory group for contact testing
       add_host:
         hostname: "{{ item }}"
         groups: "contact_targets"
-        vm_folder: "{{ vm_folder_map[item] | default('') }}"
-        vm_name_resolved: "{{ vm_name_map[item] | default(item) }}"
-      loop: "{{ discovery_success_hosts | default([]) }}"
+        vm_folder: "{{ ansible_stats.data.vm_folder_map[item] | default('') }}"
+        vm_name_resolved: "{{ ansible_stats.data.vm_name_map[item] | default(item) }}"
+      loop: "{{ ansible_stats.data.discovery_success_hosts | default([]) }}"
 
 - name: Check SSH reachability (contact)
   hosts: contact_targets
@@ -47,10 +47,10 @@
     - name: Record successful contact results
       set_stats:
         data:
-          contact_success_hosts: "{{ contact_success_hosts | default([]) + [inventory_hostname] }}"
+          contact_success_hosts: "{{ ansible_stats.data.contact_success_hosts | default([]) + [inventory_hostname] }}"
           contact_method_map: >-
             {{
-              contact_method_map | default({}) | combine({
+              ansible_stats.data.contact_method_map | default({}) | combine({
                 inventory_hostname: 'ssh' if ssh_connectivity is succeeded else 'ping'
               })
             }}
@@ -63,10 +63,10 @@
     - name: Record failed contact results
       set_stats:
         data:
-          contact_failed_hosts: "{{ contact_failed_hosts | default([]) + [inventory_hostname] }}"
+          contact_failed_hosts: "{{ ansible_stats.data.contact_failed_hosts | default([]) + [inventory_hostname] }}"
           contact_failure_reasons: >-
             {{
-              contact_failure_reasons | default({}) | combine({
+              ansible_stats.data.contact_failure_reasons | default({}) | combine({
                 inventory_hostname: ssh_connectivity.msg | default('SSH and ping connectivity failed')
               })
             }}
@@ -100,11 +100,11 @@
           ========================================
           CONTACT PHASE COMPLETED
           ========================================
-          Tested Hosts: {{ discovery_success_hosts | default([]) | length }}
-          Successful: {{ contact_success_hosts | default([]) | length }}
-          Failed: {{ contact_failed_hosts | default([]) | length }}
-          Success Rate: {{ ((contact_success_hosts | default([]) | length) * 100.0 / (discovery_success_hosts | default([]) | length)) | round(1) }}%
+          Tested Hosts: {{ ansible_stats.data.discovery_success_hosts | default([]) | length }}
+          Successful: {{ ansible_stats.data.contact_success_hosts | default([]) | length }}
+          Failed: {{ ansible_stats.data.contact_failed_hosts | default([]) | length }}
+          Success Rate: {{ ((ansible_stats.data.contact_success_hosts | default([]) | length) * 100.0 / (ansible_stats.data.discovery_success_hosts | default([]) | length)) | round(1) }}%
           ========================================
-          Contactable Hosts: {{ contact_success_hosts | default([]) | join(', ') }}
-          Failed Hosts: {{ contact_failed_hosts | default([]) | join(', ') }}
+          Contactable Hosts: {{ ansible_stats.data.contact_success_hosts | default([]) | join(', ') }}
+          Failed Hosts: {{ ansible_stats.data.contact_failed_hosts | default([]) | join(', ') }}
           ========================================

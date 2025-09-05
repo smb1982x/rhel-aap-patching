@@ -10,7 +10,7 @@
     - name: Check if verification produced any successful hosts
       fail:
         msg: "No hosts available for patching - verify_success_hosts is empty"
-      when: verify_success_hosts | default([]) | length == 0
+      when: ansible_stats.data.verify_success_hosts | default([]) | length == 0
 
     - name: Create dynamic inventory group for patching with temp directory config
       add_host:
@@ -18,7 +18,7 @@
         groups: "patch_targets"
         # Set ansible_remote_tmp at host level for proper precedence
         ansible_remote_tmp: "/tmp/ansible-temp/{{ ansible_user | default(ansible_ssh_user | default('ansible')) }}"
-      loop: "{{ verify_success_hosts | default([]) }}"
+      loop: "{{ ansible_stats.data.verify_success_hosts | default([]) }}"
 
 - name: Prepare remote temp directory for Ansible operations
   hosts: patch_targets
@@ -241,16 +241,16 @@
     - name: Record successful patch results
       set_stats:
         data:
-          patch_success_hosts: "{{ patch_success_hosts | default([]) + [inventory_hostname] }}"
+          patch_success_hosts: "{{ ansible_stats.data.patch_success_hosts | default([]) + [inventory_hostname] }}"
           patch_method_map: >-
             {{
-              patch_method_map | default({}) | combine({
+              ansible_stats.data.patch_method_map | default({}) | combine({
                 inventory_hostname: patch_method
               })
             }}
           patch_repos_used: >-
             {{
-              patch_repos_used | default({}) | combine({
+              ansible_stats.data.patch_repos_used | default({}) | combine({
                 inventory_hostname: rhel_repos
               })
             }}
@@ -261,10 +261,10 @@
     - name: Record failed patch results (including connection failures)
       set_stats:
         data:
-          patch_failed_hosts: "{{ patch_failed_hosts | default([]) + [inventory_hostname] }}"
+          patch_failed_hosts: "{{ ansible_stats.data.patch_failed_hosts | default([]) + [inventory_hostname] }}"
           patch_failure_reasons: >-
             {{
-              patch_failure_reasons | default({}) | combine({
+              ansible_stats.data.patch_failure_reasons | default({}) | combine({
                 inventory_hostname: 
                   "Connection failure after retries" if patch_connection_issue | default(false)
                   else dnf_repo_wait.stderr | default(yum_repo_wait.stderr | default('Unknown patching error'))
@@ -299,10 +299,10 @@
           ========================================
           PATCH PHASE COMPLETED
           ========================================
-          Target Hosts: {{ verify_success_hosts | default([]) | length }}
+          Target Hosts: {{ ansible_stats.data.verify_success_hosts | default([]) | length }}
           Successful: {{ ansible_stats.data.patch_success_hosts | default([]) | length }}
           Failed: {{ ansible_stats.data.patch_failed_hosts | default([]) | length }}
-          Success Rate: {{ ((ansible_stats.data.patch_success_hosts | default([]) | length) * 100.0 / (verify_success_hosts | default([]) | length)) | round(1) }}%
+          Success Rate: {{ ((ansible_stats.data.patch_success_hosts | default([]) | length) * 100.0 / (ansible_stats.data.verify_success_hosts | default([]) | length)) | round(1) }}%
           ========================================
           Successful Hosts: {{ ansible_stats.data.patch_success_hosts | default([]) | join(', ') }}
           Failed Hosts: {{ ansible_stats.data.patch_failed_hosts | default([]) | join(', ') }}

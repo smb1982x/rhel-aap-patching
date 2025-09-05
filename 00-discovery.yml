@@ -27,16 +27,16 @@
     - name: Store successful VM discovery results
       set_stats:
         data:
-          discovery_success_hosts: "{{ discovery_success_hosts | default([]) + [inventory_hostname] }}"
+          discovery_success_hosts: "{{ ansible_stats.data.discovery_success_hosts | default([]) + [inventory_hostname] }}"
           vm_folder_map: >-
             {{
-              vm_folder_map | default({}) | combine({
+              ansible_stats.data.vm_folder_map | default({}) | combine({
                 inventory_hostname: vm_info.instance.hw_folder
               })
             }}
           vm_name_map: >-
             {{
-              vm_name_map | default({}) | combine({
+              ansible_stats.data.vm_name_map | default({}) | combine({
                 inventory_hostname: vm_info.instance.hw_name | default(hostvars[inventory_hostname].vm_name | default(inventory_hostname))
               })
             }}
@@ -50,10 +50,10 @@
     - name: Store failed VM discovery results
       set_stats:
         data:
-          discovery_failed_hosts: "{{ discovery_failed_hosts | default([]) + [inventory_hostname] }}"
+          discovery_failed_hosts: "{{ ansible_stats.data.discovery_failed_hosts | default([]) + [inventory_hostname] }}"
           discovery_failure_reasons: >-
             {{
-              discovery_failure_reasons | default({}) | combine({
+              ansible_stats.data.discovery_failure_reasons | default({}) | combine({
                 inventory_hostname: vm_info.msg | default('VM not found or accessible in vCenter')
               })
             }}
@@ -93,10 +93,10 @@
           DISCOVERY PHASE COMPLETED
           ========================================
           Total Hosts: {{ groups['all'] | length }}
-          Successful: {{ discovery_success_hosts | default([]) | length }}
-          Failed: {{ discovery_failed_hosts | default([]) | length }}
-          Success Rate: {{ ((discovery_success_hosts | default([]) | length) * 100.0 / groups['all'] | length) | round(1) }}%
+          Successful: {{ ansible_stats.data.discovery_success_hosts | default([]) | length }}
+          Failed: {{ ansible_stats.data.discovery_failed_hosts | default([]) | length }}
+          Success Rate: {{ ((ansible_stats.data.discovery_success_hosts | default([]) | length) * 100.0 / groups['all'] | length) | round(1) }}%
           ========================================
-          Successful Hosts: {{ discovery_success_hosts | default([]) | join(', ') }}
-          Failed Hosts: {{ discovery_failed_hosts | default([]) | join(', ') }}
+          Successful Hosts: {{ ansible_stats.data.discovery_success_hosts | default([]) | join(', ') }}
+          Failed Hosts: {{ ansible_stats.data.discovery_failed_hosts | default([]) | join(', ') }}
           ========================================
